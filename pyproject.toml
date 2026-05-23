@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "golddaytrading"
+version = "0.1.0"
+description = "Multi-agent LLM framework for intraday gold (XAU/USD) day trading"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "tmk11" }]
+keywords = ["gold", "day-trading", "xauusd", "llm", "multi-agent", "trading"]
+
+dependencies = [
+    "yfinance>=0.2.40",
+    "pandas>=2.0",
+    "numpy>=1.26",
+    "requests>=2.31",
+    "python-dateutil>=2.9",
+    "rich>=13.7",
+    "typer>=0.12",
+    "openai>=1.40",
+]
+
+[project.optional-dependencies]
+anthropic = ["anthropic>=0.34"]
+gemini = ["google-generativeai>=0.7"]
+all = ["anthropic>=0.34", "google-generativeai>=0.7"]
+dev = ["pytest>=8.0", "pytest-mock>=3.12"]
+
+[project.scripts]
+golddaytrading = "golddaytrading.cli.main:app"
+gdt = "golddaytrading.cli.main:app"
+
+[tool.setuptools.packages.find]
+include = ["golddaytrading*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

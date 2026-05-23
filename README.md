@@ -1,0 +1,250 @@
+# GoldDayTrading
+
+> **Multi-agent LLM framework for intraday gold (XAU/USD) day trading.**
+> Adapted from [tmk11/TradingAgents](https://github.com/tmk11/TradingAgents)
+> (a gold-tilted fork of [TauricResearch/TradingAgents](https://github.com/TauricResearch/TradingAgents))
+> and re-engineered specifically for **day-trading the gold complex** —
+> futures (`GC=F` / `MGC=F`), spot pairs (`XAUUSD=X`), and gold ETFs
+> (`GLD`, `IAU`) on intraday timeframes.
+
+---
+
+## Why this fork exists
+
+Upstream `TradingAgents` is a brilliant LangGraph framework, but it's
+designed for **daily-cadence equity analysis** — it pulls daily
+candles, runs a multi-round debate over many minutes, and produces a
+"BUY / HOLD / SELL" thesis for a position held for days or weeks.
+
+Day-trading gold is a different sport:
+
+| Concern              | Upstream (daily) | GoldDayTrading (intraday)                  |
+| -------------------- | ---------------- | ------------------------------------------- |
+| Candles              | 1d               | 1m / 5m / 15m / 1h (+ 4h resample)          |
+| Decision horizon     | days–weeks       | minutes–hours, **flat by NY close**         |
+| Macro data           | FRED daily       | yfinance hourly DXY / yields / VIX / TIPS   |
+| News                 | scraped digest   | last 6–12h RSS only (older = priced in)     |
+| Catalysts            | ad-hoc mention   | structured 24h economic calendar + blackout |
+| Indicators           | trend-following  | + VWAP, opening range, ATR stops, pivots    |
+| Sessions             | n/a              | Tokyo / London / NY / overlap classifier    |
+| Risk                 | qualitative      | deterministic R-multiple + daily loss cap   |
+| Final output         | research report  | copy-pastable trade plan                    |
+| Debate rounds        | up to many       | 1 (configurable)                            |
+| External deps        | LangGraph, etc.  | yfinance + pandas + openai (light)          |
+
+The result is a **decision-support system** that produces, on each
+run, a single trade plan with entry / stop / TP1 / TP2 / position
+size / time-in-force, refusing to fire if a high-impact USD print is
+inside the blackout window or if R:R falls below your minimum.
+
+> **Disclaimer.** This is research and decision-support tooling, not
+> financial advice. Markets can and will hand you the loss your
+> position-sizing assumed they wouldn't. Test on paper first.
+
+---
+
+## Architecture
+
+```text
+              ┌─────────────────────── Data layer ───────────────────────┐
+              │ Intraday OHLCV (yfinance) │ Indicator battery │ Sessions │
+              │ Macro pulse (DXY/yields/VIX/TIP/ES) │ Gold news (RSS)    │
+              │           Economic calendar (ForexFactory)               │
+              └──────────────────────────────────────────────────────────┘
+                                          │
+       ┌──────────┬──────────┬──────────┬──────────┐
+       ▼          ▼          ▼          ▼          ▼
+  Technical    Session     Macro      News /    Sentiment
+   Analyst   Strategist    Pulse    Catalyst     (light)
+       └──────────┴────┬─────┴──────────┴──────────┘
+                       ▼
+                  Bull ↔ Bear  (1 round)
+                       │
+                       ▼
+                Research Manager  (LONG / SHORT / FLAT + levels)
+                       │
+                       ▼
+                Risk Manager      (deterministic guardrails + LLM verdict)
+                       │
+                       ▼
+                Day Trader        (final copy-pastable plan)
+```
+
+Every stage updates a shared `ctx` dict, so a run is deterministic
+given the same inputs and the LLM seed — easy to inspect, replay,
+and test.
+
+---
+
+## Install
+
+Requires Python 3.10+.
+
+```bash
+git clone https://github.com/<your-fork>/GoldDayTrading.git
+cd GoldDayTrading
+
+python -m venv .venv && source .venv/bin/activate
+pip install -e .
+```
+
+Optional extras:
+
+```bash
+pip install -e ".[anthropic]"   # Claude support
+pip install -e ".[gemini]"      # Gemini support
+pip install -e ".[dev]"         # pytest + pytest-mock
+```
+
+Copy the example env file and fill in **only the provider you want
+to use** — any single one is enough:
+
+```bash
+cp .env.example .env
+# then edit .env and set OPENAI_API_KEY=... (or ANTHROPIC_API_KEY=..., etc.)
+```
+
+If no key is set, `GoldDayTrading` automatically downgrades to an
+**offline heuristic** mode so the data pipeline still runs end-to-end
+(useful for smoke tests, demos, and CI).
+
+---
+
+## CLI
+
+The package installs two entry points: `golddaytrading` and the short
+alias `gdt`.
+
+### `analyze` — run one full analysis
+
+```bash
+gdt analyze                                         # XAUUSD=X on 15m
+gdt analyze GC=F --tf 5m --account 25000 --risk-pct 0.5
+gdt analyze GLD --tf 1h --provider anthropic --deep-llm claude-3-5-sonnet-20241022
+gdt analyze XAUUSD=X --lang Vietnamese              # final plan in Vietnamese
+gdt analyze --no-news --no-sentiment                # data + TA + risk only
+```
+
+Output ends with a markdown trade plan like:
+
+```markdown
+## Gold Day-Trade Plan — XAUUSD=X, 2026-05-23 14:32 UTC
+
+- **Bias:** LONG
+- **Setup:** VWAP reclaim during London/NY overlap
+- **Entry trigger:** above 2354.20 (5-min close)
+- **Stop:** 2349.40   (risk = $50, 1.5 ATR)
+- **TP1 / TP2:** 2362.00 / 2370.00   (R:R = 1.6 / 2.4)
+- **Position size:** 10.4 units
+- **Time-in-force:** until 21:00 UTC (NY close) or 90 min max hold
+- **Blackouts:** none in the next 60 min
+- **Why now:** (1) DXY -0.18% over 1h, ^TNX -0.12%; (2) reclaim of VWAP
+  inside the London-NY overlap; (3) RSI 56 with bullish MACD cross.
+- **What kills it:** loss of VWAP and re-entry below 2349.40.
+- **Risk Manager verdict:** APPROVE
+```
+
+### `info` — quick context dump (no LLM call)
+
+```bash
+gdt info               # current session, macro pulse, calendar
+gdt info GC=F
+```
+
+---
+
+## Python API
+
+```python
+from golddaytrading import load_config, DayTradingPipeline
+
+cfg = load_config(
+    ticker="XAUUSD=X",
+    primary_timeframe="15m",
+    account_usd=10_000,
+    risk_per_trade_pct=0.5,
+    debate_rounds=1,
+)
+pipeline = DayTradingPipeline(cfg=cfg)
+ctx = pipeline.run()
+
+print(ctx["final_plan"])
+# Inspect any intermediate artifact:
+print(ctx["technical_report"])
+print(ctx["risk_report"])
+print(ctx["guardrail"])    # deterministic risk bundle
+```
+
+Each run is also persisted as a single markdown file under
+`~/.golddaytrading/runs/` for later review.
+
+---
+
+## Configuration
+
+All settings can be supplied either via `GDTConfig(...)`, the CLI
+flags shown above, or environment variables. Below are the most
+useful ones; see [`.env.example`](.env.example) for the full list.
+
+| Env var                     | Default     | What it controls                     |
+| --------------------------- | ----------- | ------------------------------------ |
+| `GDT_DEFAULT_TICKER`        | `XAUUSD=X`  | Default ticker for `gdt analyze`     |
+| `GDT_PRIMARY_TIMEFRAME`     | `15m`       | Primary intraday timeframe           |
+| `GDT_HIGHER_TIMEFRAME`      | `1h`        | Trend-confirmation timeframe         |
+| `GDT_LLM_PROVIDER`          | `openai`    | `openai` / `anthropic` / `gemini` / `offline` |
+| `GDT_DEEP_LLM`              | `gpt-4o`    | Deep-thinking model                  |
+| `GDT_QUICK_LLM`             | `gpt-4o-mini` | Quick-thinking model               |
+| `GDT_ACCOUNT_USD`           | `10000`     | Account size for position sizing     |
+| `GDT_RISK_PER_TRADE_PCT`    | `0.5`       | Max % risk per trade                 |
+| `GDT_DAILY_LOSS_LIMIT_PCT`  | `2.0`       | Force flat after this much daily loss |
+| `GDT_MIN_RR`                | `1.5`       | Minimum risk:reward ratio            |
+| `GDT_ATR_STOP_MULT`         | `1.5`       | Stop = N × ATR(14)                   |
+| `GDT_OUTPUT_LANGUAGE`       | `English`   | Output language for the final plan   |
+| `GDT_DEBATE_ROUNDS`         | `1`         | Bull/Bear debate rounds              |
+| `GDT_ENABLE_ECON_CALENDAR`  | `1`         | Toggle economic-calendar lookup      |
+
+---
+
+## Testing
+
+```bash
+pip install -e ".[dev]"
+pytest
+```
+
+The smoke tests build synthetic OHLCV in-process and exercise the
+indicator battery, session classifier, risk guardrails, and the
+offline LLM fallback — no network, no API keys, no external services.
+
+---
+
+## Differences from upstream `TradingAgents`
+
+| Component             | Upstream                              | GoldDayTrading              |
+| --------------------- | ------------------------------------- | --------------------------- |
+| Orchestration         | LangGraph                             | Linear pipeline (plain Python) |
+| Cadence               | 1-day candles                         | 1m / 5m / 15m / 1h          |
+| Macro                 | FRED daily series                     | yfinance hourly pulse       |
+| News                  | yfinance/AV news + RSS digest         | last-12h RSS, no auth       |
+| Calendar              | n/a                                   | ForexFactory free JSON      |
+| Sessions              | n/a                                   | UTC FX-session classifier   |
+| Indicators            | StockStats library                    | Pure pandas/numpy           |
+| Fundamentals analyst  | included                              | removed (gold has none)     |
+| Debate rounds         | up to N                               | 1 (configurable)            |
+| Risk                  | qualitative                           | hard guardrails + LLM       |
+| Final output          | markdown research report              | structured trade plan       |
+| Web UI                | FastAPI + React                       | not yet (v0.2 candidate)    |
+
+---
+
+## Roadmap
+
+- v0.2 — Web UI for queueing intraday runs and reviewing plans.
+- v0.3 — Backtest harness (replay 5m bars, score the plans).
+- v0.4 — Live paper-trading hook into a broker (OANDA / IBKR).
+
+---
+
+## License
+
+Apache 2.0 — same as the upstream `TradingAgents`. See [LICENSE](LICENSE).
