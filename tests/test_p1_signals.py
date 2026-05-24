@@ -434,7 +434,7 @@ def test_quant_baseline_uses_macro_regime_score() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_pipeline_offline_run_uses_deterministic_levels(monkeypatch) -> None:
+def test_pipeline_offline_run_uses_deterministic_levels(monkeypatch, tmp_path) -> None:
     """The full offline pipeline must produce a guardrail with prices
     that exactly match the chosen level-pool idea (no LLM-invented
     numbers can leak through on the happy path)."""
@@ -454,7 +454,8 @@ def test_pipeline_offline_run_uses_deterministic_levels(monkeypatch) -> None:
                         lambda *a, **k: [])
 
     cfg = load_config(min_rr=1.0)
-    cfg.results_dir = "/tmp/gdt_test_runs"
+    cfg.results_dir = str(tmp_path / "runs")
+    cfg.journal_db_path = str(tmp_path / "journal.sqlite3")
     p = pipeline_mod.DayTradingPipeline(cfg=cfg, logger=lambda *_: None)
     ctx = p.run("XAUUSD=X")
 

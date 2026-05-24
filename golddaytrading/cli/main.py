@@ -198,6 +198,228 @@ def version() -> None:
     console.print(f"GoldDayTrading v{__version__}")
 
 
+# ---------------------------------------------------------------------------
+# Backtest command
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def backtest(
+    ticker: Optional[str] = typer.Argument(
+        None,
+        help="Gold-complex ticker (defaults to GDT_DEFAULT_TICKER / XAUUSD=X).",
+    ),
+    timeframe: str = typer.Option(
+        "15m", "--tf", "-t", help="Primary timeframe (1m / 5m / 15m / 1h).",
+    ),
+    bars: int = typer.Option(
+        2000, "--bars", help="How many primary-TF bars to fetch.",
+    ),
+    warmup: int = typer.Option(
+        200, "--warmup", help="Bars consumed before the first decision.",
+    ),
+    horizon: int = typer.Option(
+        32, "--horizon",
+        help="Bars to walk forward when resolving each idea.",
+    ),
+    step: int = typer.Option(
+        1, "--step", help="Stride between decision bars.",
+    ),
+    strategy: str = typer.Option(
+        "best_idea", "--strategy",
+        help="best_idea | all_ideas | p_up_aligned",
+    ),
+    min_rr: float = typer.Option(
+        None, "--min-rr",
+        help="Minimum R:R for a setup to enter the pool. "
+             "Defaults to GDT_MIN_RR (1.5).",
+    ),
+    no_htf: bool = typer.Option(
+        False, "--no-htf",
+        help="Disable HTF resampling (level pool runs without HTF tie-breaker).",
+    ),
+) -> None:
+    """Walk-forward backtest of the deterministic level-pool layer."""
+    _banner()
+    from golddaytrading.backtest.replay import run_backtest
+    from golddaytrading.backtest.stats import render_full_report
+    from golddaytrading.dataflows.intraday_data import fetch_intraday_ohlcv
+
+    cfg = load_config()
+    if ticker:
+        cfg.ticker = ticker
+    if min_rr is not None:
+        cfg.min_rr = float(min_rr)
+
+    console.print(
+        f"[cyan]→[/cyan] Fetching [bold]{cfg.ticker}[/bold] {timeframe} bars "
+        f"(target ≥ {bars}) for backtest…"
+    )
+    df = fetch_intraday_ohlcv(cfg.ticker, timeframe, bars)
+    if df is None or df.empty:
+        console.print(
+            "[red]Failed to fetch OHLCV.[/red] yfinance was unreachable or "
+            "the ticker / timeframe combo is unavailable."
+        )
+        raise typer.Exit(code=1)
+
+    console.print(
+        f"[dim]Loaded {len(df)} bars from "
+        f"{df.index[0]:%Y-%m-%d %H:%M} to {df.index[-1]:%Y-%m-%d %H:%M} UTC."
+        f"[/dim]"
+    )
+
+    htf_factor: Optional[int] = None if no_htf else 4
+    with console.status("[bold green]Running walk-forward backtest…",
+                        spinner="dots"):
+        report = run_backtest(
+            df, cfg,
+            warmup_bars=warmup,
+            step_bars=step,
+            horizon_bars=horizon,
+            strategy=strategy,
+            htf_resample_factor=htf_factor,
+            ticker=cfg.ticker,
+            timeframe=timeframe,
+        )
+
+    console.rule("[bold green]Backtest report")
+    console.print(Markdown(render_full_report(report)))
+
+
+# ---------------------------------------------------------------------------
+# Journal command (sub-app)
+# ---------------------------------------------------------------------------
+
+
+journal_app = typer.Typer(
+    name="journal",
+    help="Inspect / update the SQLite trade journal.",
+    no_args_is_help=True,
+    add_completion=False,
+)
+
+
+@journal_app.command("stats")
+def journal_stats(
+    days: int = typer.Option(30, "--days",
+                             help="Rolling window in days."),
+    ticker: Optional[str] = typer.Option(None, "--ticker"),
+) -> None:
+    """Show rolling per-setup expectancy from the journal."""
+    from golddaytrading.backtest.journal import TradeJournal
+
+    cfg = load_config()
+    j = TradeJournal(cfg.journal_db_path)
+    block = j.stats_block(days_back=days, ticker=ticker)
+    console.print(Markdown(block))
+
+
+@journal_app.command("list")
+def journal_list(
+    days: Optional[int] = typer.Option(
+        None, "--days", help="Filter to plans logged in the last N days."
+    ),
+    ticker: Optional[str] = typer.Option(None, "--ticker"),
+    limit: int = typer.Option(20, "--limit"),
+) -> None:
+    """List recent plans (with their current outcome, if any)."""
+    from golddaytrading.backtest.journal import TradeJournal
+
+    cfg = load_config()
+    j = TradeJournal(cfg.journal_db_path)
+    plans = j.list_plans(days_back=days, ticker=ticker, limit=limit)
+    if not plans:
+        console.print("[dim]No plans logged.[/dim]")
+        return
+
+    table = Table(
+        title=f"Trade journal — last {len(plans)} plan(s)",
+        show_lines=False,
+    )
+    table.add_column("id", style="bold")
+    table.add_column("when (UTC)")
+    table.add_column("ticker")
+    table.add_column("setup")
+    table.add_column("bias")
+    table.add_column("entry")
+    table.add_column("stop")
+    table.add_column("approved")
+    table.add_column("outcome")
+    for p in plans:
+        outs = j.list_outcomes_for_plan(int(p["id"]))
+        last_outcome = outs[-1] if outs else {}
+        table.add_row(
+            str(p["id"]),
+            (p["created_at"] or "")[:16],
+            p["ticker"] or "?",
+            p["setup_id"] or "-",
+            p["bias"] or "-",
+            f"{p['entry']:.2f}" if p["entry"] is not None else "-",
+            f"{p['stop']:.2f}" if p["stop"] is not None else "-",
+            "yes" if p["approved"] else "no",
+            (
+                f"{last_outcome.get('resolution')} "
+                f"({last_outcome.get('realised_r'):+.2f}R)"
+                if last_outcome and last_outcome.get("realised_r") is not None
+                else (last_outcome.get("resolution") or "-")
+            ),
+        )
+    console.print(table)
+
+
+@journal_app.command("record")
+def journal_record(
+    plan_id: int = typer.Argument(..., help="Plan id to record an outcome for."),
+    resolution: str = typer.Option(
+        ..., "--resolution", "-r",
+        help="tp1 | tp2 | stop | expired | never_triggered | manual",
+    ),
+    realised_r: Optional[float] = typer.Option(
+        None, "--realised-r", help="Realised R-multiple (signed).",
+    ),
+    exit_price: Optional[float] = typer.Option(
+        None, "--exit-price",
+    ),
+    notes: str = typer.Option("", "--notes"),
+) -> None:
+    """Record a trade outcome against a previously-logged plan."""
+    from golddaytrading.backtest.journal import (
+        ACCEPTED_RESOLUTIONS,
+        TradeJournal,
+    )
+
+    if resolution not in ACCEPTED_RESOLUTIONS:
+        console.print(
+            f"[red]Invalid resolution[/red]: must be one of "
+            f"{sorted(ACCEPTED_RESOLUTIONS)}"
+        )
+        raise typer.Exit(code=1)
+
+    cfg = load_config()
+    j = TradeJournal(cfg.journal_db_path)
+    outcome_id = j.record_outcome(
+        plan_id,
+        resolution=resolution,
+        realised_r=realised_r,
+        exit_price=exit_price,
+        notes=notes,
+    )
+    console.print(
+        f"[green]Recorded outcome #{outcome_id} for plan #{plan_id}[/green]"
+    )
+
+
+@journal_app.command("path")
+def journal_path() -> None:
+    """Print the resolved on-disk journal location."""
+    cfg = load_config()
+    console.print(cfg.journal_db_path)
+
+
+app.add_typer(journal_app, name="journal")
+
+
 def main() -> None:
     """Entry point used by ``python -m golddaytrading``."""
     app()
