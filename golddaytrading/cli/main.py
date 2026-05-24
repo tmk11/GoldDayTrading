@@ -199,6 +199,85 @@ def version() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Agentic workflow command (LangGraph + Graph RAG, API-only)
+# ---------------------------------------------------------------------------
+
+
+@app.command("agentic-run")
+def agentic_run(
+    ticker: Optional[str] = typer.Argument(
+        None,
+        help="Gold ticker (mặc định XAUUSD=X).",
+    ),
+    deep_llm: Optional[str] = typer.Option(
+        None, "--deep-llm",
+        help="Override model deep (mặc định lấy từ GDT_DEEP_LLM, fallback gpt-4o).",
+    ),
+    max_iter: int = typer.Option(
+        3, "--max-iter",
+        help="Số vòng lặp tối đa qua Risk Manager (1..10).",
+    ),
+    recursion_limit: int = typer.Option(
+        25, "--recursion-limit",
+        help="Hard cap LangGraph cho tổng số transition.",
+    ),
+) -> None:
+    """Chạy LangGraph agentic workflow (kiến trúc mới).
+
+    Pipeline mới này tách biệt với `gdt analyze` (linear cũ). Yêu
+    cầu cài extra `agentic` và có ``OPENAI_API_KEY``::
+
+        pip install -e ".[agentic]"
+        export OPENAI_API_KEY=...
+        gdt agentic-run XAUUSD=X --max-iter 3
+    """
+    _banner()
+    try:
+        from golddaytrading.agentic.runner import (
+            render_final_report,
+            run_agentic_workflow,
+        )
+    except ImportError as exc:
+        console.print(
+            f"[red]Cần cài extra `agentic`:[/red] "
+            f"`pip install -e \".[agentic]\"` ({exc})"
+        )
+        raise typer.Exit(code=1)
+
+    asset = ticker or os.environ.get("GDT_DEFAULT_TICKER", "XAUUSD=X")
+    if not os.environ.get("OPENAI_API_KEY"):
+        console.print(
+            "[red]Workflow agentic yêu cầu OPENAI_API_KEY.[/red] "
+            "Pipeline tuyến tính cũ vẫn chạy được offline qua `gdt analyze`."
+        )
+        raise typer.Exit(code=1)
+
+    console.print(
+        f"[cyan]→[/cyan] Khởi chạy agentic workflow cho "
+        f"[bold]{asset}[/bold] (deep_llm="
+        f"{deep_llm or os.environ.get('GDT_DEEP_LLM', 'gpt-4o')})…"
+    )
+
+    try:
+        with console.status(
+            "[bold green]LangGraph đang chạy (data → tech → macro → risk)…",
+            spinner="dots",
+        ):
+            final_state = run_agentic_workflow(
+                asset=asset,
+                deep_llm=deep_llm,
+                max_iterations=max_iter,
+                recursion_limit=recursion_limit,
+            )
+    except Exception as exc:
+        console.print(f"[red]Workflow lỗi:[/red] {exc}")
+        raise typer.Exit(code=1)
+
+    console.rule("[bold green]Báo cáo cuối")
+    console.print(Markdown(render_final_report(final_state)))
+
+
+# ---------------------------------------------------------------------------
 # Backtest command
 # ---------------------------------------------------------------------------
 

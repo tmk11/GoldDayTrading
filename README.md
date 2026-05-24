@@ -110,6 +110,108 @@ If no key is set, `GoldDayTrading` automatically downgrades to an
 
 ---
 
+## Kiến trúc Agentic Workflow (mới — LangGraph + Graph RAG)
+
+Phiên bản 0.3 bổ sung kiến trúc Agentic Workflow song song với
+pipeline tuyến tính cũ. Thiết kế nằm trong package
+`golddaytrading.agentic/` và **không thay thế** pipeline cũ —
+`gdt analyze` vẫn chạy được như trước (kể cả ở chế độ offline).
+
+Điểm khác biệt chính:
+
+| Tiêu chí | Pipeline cũ (`gdt analyze`) | Workflow mới (`gdt agentic-run`) |
+|---|---|---|
+| Topology | Tuyến tính | StateGraph có chu trình (LangGraph) |
+| Routing | Cố định | Risk Manager **tự chỉ định** node quay lại |
+| Tool calling | Python gọi tool trước prompt | LLM tự gọi tool (`bind_tools` + `ToolNode`) |
+| Bộ nhớ lịch sử | Không | Graph RAG (NetworkX KG + ChromaDB) |
+| LLM | OpenAI/Anthropic/Gemini/offline | **API-only**, OpenAI-compatible |
+| Local model | — | Không tải HF — orchestrator CPU thuần |
+
+### Cài đặt extra `agentic`
+
+```bash
+pip install -e ".[agentic]"
+export OPENAI_API_KEY=...
+# (Tuỳ chọn) chỉ định model deep — KHÔNG hardcode trong code:
+export GDT_DEEP_LLM=gpt-4o
+```
+
+### Chạy workflow
+
+```bash
+gdt agentic-run XAUUSD=X --max-iter 3
+```
+
+Workflow đi qua các node theo thứ tự (xem `agentic/graph.py`):
+
+```
+START → data_gatherer → technical_agent → macro_news_agent → risk_manager
+                                                                  │
+                                                                  ▼
+              ┌──────── route_back (technical | macro_news) ◀────┤
+              ▼                                                   │
+       (vòng phản biện)                                           │
+                                                                  ▼
+                                                                 END  ◀── finalize
+```
+
+* `data_gatherer` — pure Python, fetch OHLCV + macro pulse + lịch
+  + RSS news, đẩy vào `AgentState`.
+* `technical_agent` — bind tool: `get_live_price`,
+  `get_intraday_ohlcv`, `get_higher_timeframe_trend`,
+  `get_active_session`, `get_level_pool`. Trả `AgentOutput`.
+* `macro_news_agent` — bind tool: `get_macro_pulse`,
+  `get_econ_calendar`, `get_gold_news`, **`query_historical_context`**
+  (Graph RAG). Trả `AgentOutput`.
+* `risk_manager` — không tool, dùng structured output
+  `RiskManagerVerdict` để **chọn**: hoặc `finalize` (phát
+  `FinalDecision`), hoặc `route_back` (chỉ định node nào quay lại
+  + câu hỏi cụ thể).
+
+### Graph RAG (bộ nhớ lịch sử)
+
+Bên trong `agentic/graph_rag.py`:
+
+* **NetworkX MultiDiGraph** lưu quan hệ vĩ mô (DXY⊥GOLD,
+  REAL_YIELD⊥GOLD, EURUSD⊥DXY, FOMC→DXY…). Đã seed sẵn các quan
+  hệ prior; mở rộng qua `ingest_correlation()`.
+* **ChromaDB persistent client** lưu các "trading episode" được
+  embed bằng **OpenAI text-embedding-3-small** qua API. Không tải
+  embedding model nội bộ — đúng yêu cầu API-only / no-GPU.
+* `query_historical_context(query, k, regime_filter)` trả về top-k
+  episode tương tự + cạnh KG liên quan, đã render thành block
+  markdown để LLM đọc trực tiếp.
+
+### Sử dụng từ Python
+
+```python
+from golddaytrading.agentic import run_agentic_workflow, render_final_report
+
+state = run_agentic_workflow("XAUUSD=X", max_iterations=3)
+
+print(state.final_decision.bias, state.final_decision.confidence)
+print(render_final_report(state))
+```
+
+### Mở rộng KG / RAG bằng dữ liệu lịch sử
+
+```python
+from golddaytrading.agentic import GraphRAG, build_episode_from_macro_pulse
+from golddaytrading.dataflows.macro_pulse import fetch_macro_pulse
+
+rag = GraphRAG.default()
+pulse = fetch_macro_pulse()
+episode = build_episode_from_macro_pulse(
+    pulse, gold_chg_1h=-0.42,
+    note="CPI trên dự báo 0.1%, gold giảm.",
+)
+rag.ingest_episode(episode)
+print(rag.stats())
+```
+
+---
+
 ## CLI
 
 The package installs two entry points: `golddaytrading` and the short
