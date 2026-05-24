@@ -170,8 +170,18 @@ class _OpenAIEmbedder:
         self.model = os.environ.get("GDT_EMBEDDING_MODEL", model)
         kind, factory = _import_openai_embeddings()
         self._kind = kind
-        base_url = os.environ.get("OPENAI_BASE_URL") or None
-        api_key = os.environ.get("OPENAI_API_KEY") or None
+        base_url = (
+            os.environ.get("GDT_EMBEDDING_BASE_URL")
+            or os.environ.get("OPENAI_BASE_URL")
+            or None
+        )
+        if base_url and base_url.rstrip("/").endswith("/embeddings"):
+            base_url = base_url.rstrip("/")[: -len("/embeddings")]
+        api_key = (
+            os.environ.get("GDT_EMBEDDING_API_KEY")
+            or os.environ.get("OPENAI_API_KEY")
+            or None
+        )
         if kind == "langchain":
             kwargs = {"model": self.model}
             if base_url:
