@@ -20,6 +20,9 @@ Topology
     risk_manager  ------------+-+
       |
       v  (action=finalize)
+    memory_consolidator   ← Self-Learning hook (Graph RAG ingest)
+      |
+      v
     END
 
 Các edge tĩnh:
@@ -27,17 +30,19 @@ Các edge tĩnh:
 * data_gatherer → technical_agent
 * technical_agent → macro_news_agent
 * macro_news_agent → risk_manager
+* memory_consolidator → END
 
 Edge **conditional** sau Risk Manager — quyết định bằng
 :func:`risk_router` đọc ``state.next_node``:
 
-* ``"END"``                → END (final_decision đã có).
+* ``"END"``                → memory_consolidator → END
 * ``"technical_agent"``    → technical_agent (vòng phản biện mới).
 * ``"macro_news_agent"``   → macro_news_agent.
-* ``"risk_manager"`` (an toàn) → END (tránh self-loop).
 
 Đây là pattern **(A) Explicit Node Selection** — Risk Manager LLM
 *chỉ định tường minh* node nào quay lại, không heuristic Python.
+``memory_consolidator`` chen vào *trước* END để mọi run đều ingest
+1 episode vào Graph RAG (Self-Learning loop).
 """
 
 from __future__ import annotations
@@ -48,6 +53,7 @@ from typing import Optional
 from golddaytrading.agentic.nodes import (
     data_gatherer_node,
     macro_news_agent_node,
+    memory_consolidator_node,
     risk_manager_node,
     technical_agent_node,
 )
@@ -64,27 +70,31 @@ logger = logging.getLogger(__name__)
 def risk_router(state: AgentState) -> str:
     """Đọc `state.next_node` (do Risk Manager đặt) → key edge.
 
-    Trả về một trong các literal: ``"END"``, ``"technical_agent"``,
-    ``"macro_news_agent"``. Map sang node thực tế hoặc END trong
-    `add_conditional_edges`.
+    Trả về một trong các literal:
+
+    * ``"memory_consolidator"`` — finalize (final_decision đã có
+      hoặc đã hết iteration). Sau memory_consolidator sẽ là END.
+    * ``"technical_agent"``    — vòng phản biện mới với Technical.
+    * ``"macro_news_agent"``   — vòng phản biện mới với Macro/News.
 
     Có 3 hard guard để tránh infinite loop:
 
-    1. Nếu `final_decision` đã được set → END.
-    2. Nếu `iteration >= max_iterations` → END.
-    3. Nếu `next_node` không hợp lệ → END.
+    1. Nếu `final_decision` đã được set → finalize.
+    2. Nếu `iteration >= max_iterations` → finalize.
+    3. Nếu `next_node` không hợp lệ → finalize.
     """
     if state.final_decision is not None:
-        return "END"
+        return "memory_consolidator"
     if state.iteration >= state.max_iterations:
         logger.warning(
-            "Đã chạm max_iterations=%d, ép END.", state.max_iterations
+            "Đã chạm max_iterations=%d, ép finalize qua memory_consolidator.",
+            state.max_iterations,
         )
-        return "END"
+        return "memory_consolidator"
     nxt = state.next_node
     if nxt in ("technical_agent", "macro_news_agent"):
         return nxt
-    return "END"
+    return "memory_consolidator"
 
 
 # ---------------------------------------------------------------------------
@@ -115,19 +125,21 @@ def build_graph(checkpointer: Optional[object] = None):
     graph.add_node("technical_agent", technical_agent_node)
     graph.add_node("macro_news_agent", macro_news_agent_node)
     graph.add_node("risk_manager", risk_manager_node)
+    graph.add_node("memory_consolidator", memory_consolidator_node)
 
     # 2. Edge tĩnh
     graph.add_edge(START, "data_gatherer")
     graph.add_edge("data_gatherer", "technical_agent")
     graph.add_edge("technical_agent", "macro_news_agent")
     graph.add_edge("macro_news_agent", "risk_manager")
+    graph.add_edge("memory_consolidator", END)
 
     # 3. Conditional edge sau Risk Manager
     graph.add_conditional_edges(
         "risk_manager",
         risk_router,
         {
-            "END": END,
+            "memory_consolidator": "memory_consolidator",
             "technical_agent": "technical_agent",
             "macro_news_agent": "macro_news_agent",
         },

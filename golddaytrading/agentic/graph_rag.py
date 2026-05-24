@@ -574,6 +574,115 @@ class GraphRAG:
                 "persist_dir": self.persist_dir,
             }
 
+    # ----------------------------------------------------------------
+    # Visibility helpers (cho CLI `gdt agentic-info`)
+    # ----------------------------------------------------------------
+
+    def detailed_stats(self, top_k: int = 10) -> Dict[str, Any]:
+        """Phiên bản chi tiết của :meth:`stats` cho CLI.
+
+        Trả về dict gồm:
+
+        * ``kg_nodes`` / ``kg_edges`` (tổng).
+        * ``kg_node_types``: dict {type → count} (asset / macro /
+          event / derived / auto).
+        * ``kg_relation_types``: dict {relation → count} (inverse /
+          drives / leads_by_30m / …).
+        * ``kg_top_connected``: ``[(node_id, degree), …]`` top
+          ``top_k`` node có degree lớn nhất.
+        * ``vector_episodes``: tổng số episode trong Chroma.
+        * ``persist_dir``: thư mục persist.
+        """
+        with self._lock:
+            g = self.kg
+
+            # Type breakdown
+            type_counts: Dict[str, int] = {}
+            for _nid, attrs in g.nodes(data=True):
+                t = str(attrs.get("type", "unknown"))
+                type_counts[t] = type_counts.get(t, 0) + 1
+
+            # Relation breakdown
+            rel_counts: Dict[str, int] = {}
+            for _u, _v, data in g.edges(data=True):
+                r = str(data.get("relation", "?"))
+                rel_counts[r] = rel_counts.get(r, 0) + 1
+
+            # Top-connected (degree = in + out vì graph có hướng)
+            degrees = [(n, int(d)) for n, d in g.degree()]
+            degrees.sort(key=lambda x: -x[1])
+            top_connected = degrees[: max(1, top_k)]
+
+            # Vector count
+            try:
+                vector_count = int(self._collection.count())
+            except Exception as exc:  # pragma: no cover
+                logger.warning("Chroma count lỗi: %s", exc)
+                vector_count = -1
+
+            return {
+                "kg_nodes": g.number_of_nodes(),
+                "kg_edges": g.number_of_edges(),
+                "kg_node_types": type_counts,
+                "kg_relation_types": rel_counts,
+                "kg_top_connected": top_connected,
+                "vector_episodes": vector_count,
+                "persist_dir": self.persist_dir,
+            }
+
+    def list_recent_episodes(self, limit: int = 10) -> List[HistoricalEpisode]:
+        """Trả về N episode mới nhất, sắp xếp giảm dần theo timestamp.
+
+        Chroma 0.5 không hỗ trợ "ORDER BY timestamp" trực tiếp; ta
+        dùng :meth:`Collection.get` để lấy toàn bộ rồi sort trong
+        Python. Với volume vừa phải (< 100k episode) cách này đủ
+        nhanh và đỡ phải maintain index riêng.
+        """
+        with self._lock:
+            limit = max(1, int(limit))
+            try:
+                res = self._collection.get(
+                    include=["documents", "metadatas"],
+                )
+            except Exception as exc:  # pragma: no cover
+                logger.warning("Chroma get lỗi: %s", exc)
+                return []
+
+            # Schema khác `query()`: ids/documents/metadatas KHÔNG
+            # nested theo query rows mà flat.
+            ids = res.get("ids") or []
+            docs = res.get("documents") or []
+            metas = res.get("metadatas") or []
+
+            episodes: List[HistoricalEpisode] = []
+            for i, eid in enumerate(ids):
+                meta = metas[i] if i < len(metas) and metas[i] else {}
+                narrative = docs[i] if i < len(docs) else ""
+                ts_raw = meta.get("timestamp")
+                try:
+                    ts = (
+                        datetime.fromisoformat(ts_raw)
+                        if ts_raw else datetime.now(timezone.utc)
+                    )
+                except (TypeError, ValueError):
+                    ts = datetime.now(timezone.utc)
+                ents_raw = meta.get("entity_nodes") or ""
+                ents = [s for s in str(ents_raw).split("|") if s]
+                clean_meta = {
+                    k: v for k, v in meta.items()
+                    if k not in ("timestamp", "entity_nodes")
+                }
+                episodes.append(HistoricalEpisode(
+                    episode_id=str(eid),
+                    timestamp=ts,
+                    narrative=narrative,
+                    entity_nodes=ents,
+                    metadata=clean_meta,
+                ))
+
+            episodes.sort(key=lambda e: e.timestamp, reverse=True)
+            return episodes[:limit]
+
 
 # ---------------------------------------------------------------------------
 # Helpers cấp module

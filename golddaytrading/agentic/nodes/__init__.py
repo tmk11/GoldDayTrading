@@ -8,13 +8,15 @@ reducer định nghĩa trong ``state.py``.
 """
 
 from golddaytrading.agentic.nodes.data_gatherer import data_gatherer_node
-from golddaytrading.agentic.nodes.technical_agent import technical_agent_node
 from golddaytrading.agentic.nodes.macro_news_agent import macro_news_agent_node
+from golddaytrading.agentic.nodes.memory_consolidator import memory_consolidator_node
 from golddaytrading.agentic.nodes.risk_manager import risk_manager_node
+from golddaytrading.agentic.nodes.technical_agent import technical_agent_node
 
 __all__ = [
     "data_gatherer_node",
     "technical_agent_node",
     "macro_news_agent_node",
     "risk_manager_node",
+    "memory_consolidator_node",
 ]

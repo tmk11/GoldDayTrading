@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from golddaytrading.agentic.state import (
     AgentState,
@@ -184,9 +184,26 @@ def data_gatherer_node(state: AgentState) -> Dict[str, Any]:
     )
 
     # -------- 5. Macro pulse --------
+    macro_regime: Optional[str] = None
+    macro_scalars: Dict[str, float] = {}
     try:
         pulse = fetch_macro_pulse()
         macro_pulse_md = macro_pulse_block(pulse)
+
+        # Extract scalar cho Memory Consolidator dùng (tránh re-fetch).
+        macro_regime = pulse.get("__regime__") or "RANGE_BOUND"
+        for src_key, dst_key in (
+            ("DX-Y.NYB", "dxy_chg_1h"),
+            ("^TNX",     "tnx_chg_1h"),
+            ("^FVX",     "fvx_chg_1h"),
+            ("^TYX",     "tyx_chg_1h"),
+            ("^VIX",     "vix_chg_1h"),
+            ("ES=F",     "es_chg_1h"),
+            ("EURUSD=X", "eurusd_chg_1h"),
+        ):
+            chg = (pulse.get(src_key) or {}).get("chg_1h")
+            if isinstance(chg, (int, float)):
+                macro_scalars[dst_key] = float(chg)
     except Exception as exc:  # pragma: no cover
         logger.warning("Macro pulse fetch lỗi: %s", exc)
         macro_pulse_md = "_(macro pulse unavailable)_\n"
@@ -242,6 +259,8 @@ def data_gatherer_node(state: AgentState) -> Dict[str, Any]:
         "market_data": market_data,
         "macro_events": macro_events,
         "macro_pulse_block": macro_pulse_md,
+        "macro_regime": macro_regime,
+        "macro_scalars": macro_scalars,
         "calendar_block": calendar_md,
         "news_block": news_md,
         "debate_history": [log_msg],

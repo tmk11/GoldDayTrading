@@ -278,6 +278,159 @@ def agentic_run(
 
 
 # ---------------------------------------------------------------------------
+# Agentic info command (visibility cho Graph RAG memory)
+# ---------------------------------------------------------------------------
+
+
+@app.command("agentic-info")
+def agentic_info(
+    sample: int = typer.Option(
+        0, "--sample",
+        help="Số episode mới nhất cần dump (0 = chỉ stats, không dump).",
+    ),
+    top_connected: int = typer.Option(
+        10, "--top-connected",
+        help="Số node KG có degree cao nhất cần liệt kê.",
+    ),
+) -> None:
+    """In stats Graph RAG (KG + Chroma) — KHÔNG gọi LLM.
+
+    Dùng để kiểm tra bộ nhớ Self-Learning của workflow agentic:
+
+    \b
+        gdt agentic-info                         # chỉ stats
+        gdt agentic-info --sample 5              # + 5 episode mới nhất
+        gdt agentic-info --sample 20 --top-connected 5
+
+    Yêu cầu cài extra `agentic` (chứa networkx + chromadb), và tốn
+    một lần init `OpenAIEmbeddings` nội bộ — KHÔNG gọi embed/LLM
+    nào trong command này.
+    """
+    _banner()
+    try:
+        from golddaytrading.agentic.graph_rag import GraphRAG
+    except ImportError as exc:
+        console.print(
+            f"[red]Cần cài extra `agentic`:[/red] "
+            f"`pip install -e \".[agentic]\"` ({exc})"
+        )
+        raise typer.Exit(code=1)
+
+    try:
+        rag = GraphRAG.default()
+    except Exception as exc:
+        console.print(f"[red]Không khởi tạo được GraphRAG:[/red] {exc}")
+        console.print(
+            "[dim]Gợi ý: kiểm tra OPENAI_API_KEY và quyền ghi "
+            "thư mục ~/.golddaytrading/rag/.[/dim]"
+        )
+        raise typer.Exit(code=1)
+
+    stats = rag.detailed_stats(top_k=top_connected)
+
+    # ---- Bảng overview ----
+    overview = Table(title="Graph RAG — overview", show_lines=True)
+    overview.add_column("Field", style="bold")
+    overview.add_column("Value")
+    overview.add_row("Persist dir", str(stats.get("persist_dir", "?")))
+    overview.add_row(
+        "Knowledge Graph",
+        f"{stats.get('kg_nodes', 0)} nodes · {stats.get('kg_edges', 0)} edges",
+    )
+    overview.add_row(
+        "Vector store (Chroma)",
+        (
+            f"{stats.get('vector_episodes', 0)} episodes"
+            if stats.get("vector_episodes", -1) >= 0
+            else "[red]unavailable[/red]"
+        ),
+    )
+    console.print(overview)
+
+    # ---- Node types ----
+    node_types = stats.get("kg_node_types") or {}
+    if node_types:
+        nt = Table(title="KG node types", show_lines=False)
+        nt.add_column("Type", style="bold")
+        nt.add_column("Count", justify="right")
+        for t, c in sorted(node_types.items(), key=lambda x: -x[1]):
+            nt.add_row(str(t), str(c))
+        console.print(nt)
+
+    # ---- Relation types ----
+    rel_types = stats.get("kg_relation_types") or {}
+    if rel_types:
+        rt = Table(title="KG relation types", show_lines=False)
+        rt.add_column("Relation", style="bold")
+        rt.add_column("Count", justify="right")
+        for r, c in sorted(rel_types.items(), key=lambda x: -x[1]):
+            rt.add_row(str(r), str(c))
+        console.print(rt)
+
+    # ---- Top-connected ----
+    top = stats.get("kg_top_connected") or []
+    if top:
+        tc = Table(
+            title=f"Top {len(top)} connected nodes (degree = in+out)",
+            show_lines=False,
+        )
+        tc.add_column("Rank", style="dim", justify="right")
+        tc.add_column("Node", style="bold")
+        tc.add_column("Degree", justify="right")
+        for i, (node_id, deg) in enumerate(top, 1):
+            tc.add_row(str(i), str(node_id), str(deg))
+        console.print(tc)
+
+    # ---- Sample latest episodes ----
+    if sample > 0:
+        try:
+            episodes = rag.list_recent_episodes(limit=sample)
+        except Exception as exc:
+            console.print(
+                f"[yellow]Không list được episode:[/yellow] {exc}"
+            )
+            episodes = []
+
+        if not episodes:
+            console.print(
+                "\n[dim]_(Chroma chưa có episode nào — chạy "
+                "`gdt agentic-run` ít nhất 1 lần để memory_consolidator "
+                "ingest.)_[/dim]"
+            )
+        else:
+            console.rule(
+                f"[bold]Sample: {len(episodes)} episode mới nhất"
+            )
+            for i, ep in enumerate(episodes, 1):
+                ts = ep.timestamp.strftime("%Y-%m-%d %H:%M UTC")
+                regime = ep.metadata.get("regime", "—")
+                bias = ep.metadata.get("bias", "—")
+                conf = ep.metadata.get("confidence", None)
+                conf_str = f"{conf:.2f}" if isinstance(conf, (int, float)) else "—"
+                header = (
+                    f"[bold]#{i}[/bold]  [dim]{ts}[/dim]  "
+                    f"regime=[cyan]{regime}[/cyan]  "
+                    f"bias=[yellow]{bias}[/yellow]  conf={conf_str}"
+                )
+                console.print(header)
+                console.print(f"  {ep.narrative}")
+                if ep.entity_nodes:
+                    console.print(
+                        f"  [dim]entities: {', '.join(ep.entity_nodes)}[/dim]"
+                    )
+                # Bỏ qua các meta-key đã hiển thị
+                shown = {"regime", "bias", "confidence", "asset"}
+                extras = {k: v for k, v in ep.metadata.items() if k not in shown}
+                if extras:
+                    pretty = ", ".join(
+                        f"{k}={v:.2f}" if isinstance(v, float) else f"{k}={v}"
+                        for k, v in list(extras.items())[:6]
+                    )
+                    console.print(f"  [dim]meta: {pretty}[/dim]")
+                console.print()
+
+
+# ---------------------------------------------------------------------------
 # Backtest command
 # ---------------------------------------------------------------------------
 
