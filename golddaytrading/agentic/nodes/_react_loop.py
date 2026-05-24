@@ -21,6 +21,7 @@ Tách riêng helper này để Technical và Macro chỉ khác nhau ở:
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any, Dict, Iterable, List, Tuple
 
@@ -126,13 +127,72 @@ def run_react_agent(
         ))
         result = structured.invoke(messages + [final_msg])
         if not isinstance(result, AgentOutput):
-            result = AgentOutput(**dict(result))  # type: ignore[arg-type]
+            result = AgentOutput(**_normalize_agent_output(dict(result)))  # type: ignore[arg-type]
         result.agent_name = agent_name
         result.tools_called = tools_called
         return result, tools_called
     except Exception as exc:
         logger.warning("[%s] structured output lỗi: %s", agent_name, exc)
+
+    try:
+        raw = chat_model.invoke(messages + [HumanMessage(content=(
+            "Trả về DUY NHẤT một JSON object hợp lệ theo schema AgentOutput: "
+            "agent_name:string, bias:LONG|SHORT|NEUTRAL, confidence:number 0..1, "
+            "summary:string, key_levels:object, cited_sources:array, tools_called:array. "
+            "Nếu có nhiều setup/level, hãy đặt vào key_levels dưới dạng object, "
+            "không dùng array. Không thêm markdown ngoài JSON."
+        ))])
+        payload = _extract_json_object(getattr(raw, "content", raw))
+        result = AgentOutput(**_normalize_agent_output(payload))
+        result.agent_name = agent_name
+        result.tools_called = tools_called
+        return result, tools_called
+    except Exception as exc:
+        logger.warning("[%s] JSON repair output lỗi: %s", agent_name, exc)
         return _fallback_output(agent_name, f"structured-output failed: {exc}"), tools_called
+
+def _extract_json_object(content: Any) -> Dict[str, Any]:
+    text = content if isinstance(content, str) else str(content)
+    text = text.strip()
+    if text.startswith("```"):
+        text = text.strip("`")
+        if text.lstrip().startswith("json"):
+            text = text.lstrip()[4:].strip()
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start < 0 or end <= start:
+            raise
+        data = json.loads(text[start:end + 1])
+    if not isinstance(data, dict):
+        raise ValueError("AgentOutput JSON must be an object")
+    return data
+
+def _normalize_agent_output(data: Dict[str, Any]) -> Dict[str, Any]:
+    data = dict(data)
+    key_levels = data.get("key_levels")
+    if isinstance(key_levels, list):
+        normalized: Dict[str, Any] = {}
+        for idx, item in enumerate(key_levels, start=1):
+            if isinstance(item, dict):
+                prefix = str(item.get("setup_id") or item.get("setup") or f"setup_{idx}")
+                for key, value in item.items():
+                    if isinstance(value, (int, float)):
+                        normalized[f"{prefix}.{key}"] = float(value)
+            elif isinstance(item, (int, float)):
+                normalized[f"level_{idx}"] = float(item)
+        data["key_levels"] = normalized
+    elif not isinstance(key_levels, dict):
+        data["key_levels"] = {}
+    else:
+        data["key_levels"] = {
+            str(key): float(value)
+            for key, value in key_levels.items()
+            if isinstance(value, (int, float))
+        }
+    return data
 
 
 def _fallback_output(agent_name: str, reason: str) -> AgentOutput:

@@ -47,6 +47,8 @@ Thư mục mặc định: `~/.golddaytrading/rag/`
 from __future__ import annotations
 
 import logging
+import hashlib
+import math
 import os
 import pickle
 import threading
@@ -165,19 +167,53 @@ class _OpenAIEmbedder:
     """
 
     def __init__(self, model: str = "text-embedding-3-small"):
-        self.model = model
+        self.model = os.environ.get("GDT_EMBEDDING_MODEL", model)
         kind, factory = _import_openai_embeddings()
         self._kind = kind
+        base_url = os.environ.get("OPENAI_BASE_URL") or None
+        api_key = os.environ.get("OPENAI_API_KEY") or None
         if kind == "langchain":
-            self._impl = factory(model=model)
+            kwargs = {"model": self.model}
+            if base_url:
+                kwargs["base_url"] = base_url
+            if api_key:
+                kwargs["api_key"] = api_key
+            self._impl = factory(**kwargs)
         else:
             # openai SDK thuần
-            self._impl = factory()
+            kwargs = {}
+            if base_url:
+                kwargs["base_url"] = base_url
+            if api_key:
+                kwargs["api_key"] = api_key
+            self._impl = factory(**kwargs)
 
     def embed(self, texts: Sequence[str]) -> List[List[float]]:
         if not texts:
             return []
-        return _retry_embed(self._kind, self._impl, self.model, list(texts))
+        try:
+            return _retry_embed(self._kind, self._impl, self.model, list(texts))
+        except Exception as exc:
+            if os.environ.get("GDT_ENABLE_HASH_EMBEDDING_FALLBACK", "1") != "1":
+                raise
+            logger.warning(
+                "Embedding API failed (%s); using deterministic hash embeddings.",
+                exc,
+            )
+            return [_hash_embedding(text) for text in texts]
+
+def _hash_embedding(text: str, dimensions: int = 1536) -> List[float]:
+    vector = [0.0] * dimensions
+    tokens = text.lower().split()
+    if not tokens:
+        tokens = [text.lower() or "empty"]
+    for token in tokens:
+        digest = hashlib.sha256(token.encode("utf-8")).digest()
+        idx = int.from_bytes(digest[:4], "big") % dimensions
+        sign = 1.0 if digest[4] % 2 == 0 else -1.0
+        vector[idx] += sign
+    norm = math.sqrt(sum(value * value for value in vector)) or 1.0
+    return [value / norm for value in vector]
 
 
 def _retry_embed(kind: str, impl, model: str, texts: List[str]) -> List[List[float]]:
@@ -276,7 +312,7 @@ class GraphRAG:
 
     @classmethod
     def default(cls) -> "GraphRAG":
-        return cls()
+        return cls(persist_dir=os.environ.get("GDT_RAG_DIR") or None)
 
     # ----------------------------------------------------------------
     # Knowledge Graph layer

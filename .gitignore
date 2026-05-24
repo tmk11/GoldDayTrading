@@ -26,6 +26,7 @@ htmlcov/
 # Local env
 .env
 .env.local
+.env.runtime
 *.log
 
 # Project runtime data

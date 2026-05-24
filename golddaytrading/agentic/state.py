@@ -255,6 +255,8 @@ class AgentState(BaseModel):
         "XAUUSD=X",
         description="Symbol giao dịch. Mặc định XAU/USD spot.",
     )
+    primary_timeframe: str = Field("15m", description="Khung thời gian chính.")
+    higher_timeframe: str = Field("1h", description="Khung trend cao hơn.")
 
     # ------- Dữ liệu thị trường -------
     market_data: Optional[MarketDataSnapshot] = None

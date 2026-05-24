@@ -82,8 +82,10 @@ def build_client(provider: str, model: str) -> LLMClient:
         try:
             from openai import OpenAI
             timeout = float(os.environ.get("OPENAI_TIMEOUT", "30"))
+            base_url = os.environ.get("OPENAI_BASE_URL") or None
             return LLMClient(provider="openai", model=model,
-                             _impl=OpenAI(timeout=timeout, max_retries=0))
+                             _impl=OpenAI(timeout=timeout, max_retries=0,
+                                          base_url=base_url))
         except ImportError:
             logger.warning("openai SDK not installed — offline mode")
             return LLMClient(provider="offline", model=model, _impl=None)

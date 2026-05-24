@@ -20,6 +20,7 @@ với schema discriminated-union :class:`RiskManagerVerdict`.
 from __future__ import annotations
 
 import logging
+import json
 from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, model_validator
@@ -68,7 +69,7 @@ class RiskManagerVerdict(BaseModel):
     )
 
     # luôn có
-    rationale: str = Field(..., description="Tóm tắt suy luận <= 200 từ.")
+    rationale: str = Field("", description="Tóm tắt suy luận <= 200 từ.")
     contradictions_detected: List[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -237,13 +238,29 @@ def risk_manager_node(state: AgentState) -> Dict[str, Any]:
         from langchain_core.messages import HumanMessage, SystemMessage
 
         structured = chat_model.with_structured_output(RiskManagerVerdict)
-        verdict: RiskManagerVerdict = structured.invoke([
+        raw_verdict = structured.invoke([
             SystemMessage(content=SYSTEM_PROMPT),
             HumanMessage(content=user_prompt),
         ])
+        verdict = _coerce_verdict(raw_verdict)
     except Exception as exc:
         logger.warning("Risk Manager structured output lỗi: %s", exc)
-        return _fallback_finalize(state, reason=f"structured-output failed: {exc}")
+        try:
+            from langchain_core.messages import HumanMessage, SystemMessage
+
+            raw = chat_model.invoke([
+                SystemMessage(content=SYSTEM_PROMPT),
+                HumanMessage(content=user_prompt),
+                HumanMessage(content=(
+                    "Trả về DUY NHẤT một JSON object hợp lệ theo schema RiskManagerVerdict. "
+                    "Nếu finalize NEUTRAL thì final_decision phải có bias, confidence, rationale; "
+                    "time_in_force_minutes phải bỏ trống/null nếu không vào lệnh. Không thêm markdown."
+                )),
+            ])
+            verdict = _coerce_verdict(_extract_json_object(getattr(raw, "content", raw)))
+        except Exception as repair_exc:
+            logger.warning("Risk Manager JSON repair lỗi: %s", repair_exc)
+            return _fallback_finalize(state, reason=f"structured-output failed: {repair_exc}")
 
     # Override an toàn: nếu đã hết iteration mà LLM vẫn route_back →
     # ép về NEUTRAL finalize.
@@ -345,3 +362,38 @@ def _fallback_finalize(
         "debate_history": [log],
         "errors": [f"risk_manager_fallback: {reason}"],
     }
+
+def _extract_json_object(content: Any) -> Dict[str, Any]:
+    text = content if isinstance(content, str) else str(content)
+    text = text.strip()
+    if text.startswith("```"):
+        text = text.strip("`")
+        if text.lstrip().startswith("json"):
+            text = text.lstrip()[4:].strip()
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start < 0 or end <= start:
+            raise
+        data = json.loads(text[start:end + 1])
+    if not isinstance(data, dict):
+        raise ValueError("RiskManagerVerdict JSON must be an object")
+    return data
+
+def _coerce_verdict(raw: Any) -> RiskManagerVerdict:
+    data = raw.model_dump() if isinstance(raw, BaseModel) else dict(raw)
+    if not data.get("rationale"):
+        final_decision = data.get("final_decision") or {}
+        data["rationale"] = (
+            final_decision.get("rationale")
+            if isinstance(final_decision, dict) else None
+        ) or "Risk Manager finalized after schema normalization."
+    final_decision = data.get("final_decision")
+    if isinstance(final_decision, dict):
+        if final_decision.get("time_in_force_minutes") == 0:
+            final_decision["time_in_force_minutes"] = None
+        if not final_decision.get("rationale"):
+            final_decision["rationale"] = data["rationale"]
+    return RiskManagerVerdict(**data)

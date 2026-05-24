@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import threading
 import traceback
@@ -14,12 +15,11 @@ from typing import Any
 from fastapi import FastAPI, Query
 from fastapi.responses import HTMLResponse, RedirectResponse, PlainTextResponse
 
-from golddaytrading.config import load_config
-from golddaytrading.graph.pipeline import DayTradingPipeline, _render_run_md
+from golddaytrading.agentic import render_final_report, run_agentic_workflow
 
 
 app = FastAPI(title="GoldDayTrading")
-JOBS_DIR = Path.home() / ".golddaytrading" / "web_jobs"
+JOBS_DIR = Path(os.environ.get("GDT_WEB_JOBS_DIR", Path.home() / ".golddaytrading" / "web_jobs")).expanduser()
 JOBS_DIR.mkdir(parents=True, exist_ok=True)
 _executor = ThreadPoolExecutor(max_workers=1)
 _lock = threading.Lock()
@@ -64,7 +64,7 @@ def _list_jobs() -> list[dict[str, Any]]:
     return sorted(jobs, key=lambda item: item.get("created_at", ""), reverse=True)
 
 
-def _run_pipeline_job(job_id: str) -> None:
+def _run_agentic_job(job_id: str) -> None:
     meta = _read_meta(job_id)
     meta.update({"status": "running", "started_at": _now()})
     _write_meta(job_id, meta)
@@ -73,31 +73,40 @@ def _run_pipeline_job(job_id: str) -> None:
         _append_log(job_id, " ".join(str(part) for part in parts))
 
     try:
-        cfg = load_config(
-            ticker=meta["ticker"],
-            primary_timeframe=meta["tf"],
-            output_language=meta["lang"],
-            debate_rounds=int(meta.get("debate_rounds", 1)),
-            debug=True,
-        )
+        max_iterations = int(meta.get("max_iterations", meta.get("debate_rounds", 3)))
         logger(
-            "Starting full multi-agent pipeline:",
-            cfg.ticker,
-            cfg.primary_timeframe,
-            cfg.llm_provider,
-            cfg.deep_llm,
+            "Starting LangGraph + GraphRAG workflow:",
+            meta["ticker"],
+            meta["tf"],
+            "model=",
+            os.environ.get("GDT_DEEP_LLM", "gpt-4o"),
+            "rag_dir=",
+            os.environ.get("GDT_RAG_DIR", "~/.golddaytrading/rag"),
         )
-        ctx = DayTradingPipeline(cfg=cfg, logger=logger).run(cfg.ticker)
-        result_md = _render_run_md(ctx, cfg)
+        state = run_agentic_workflow(
+            meta["ticker"],
+            max_iterations=max(1, min(max_iterations, 10)),
+            initial_state_overrides={
+                "primary_timeframe": meta["tf"],
+                "higher_timeframe": meta.get("higher_tf", "1h"),
+            },
+        )
+        result_md = render_final_report(state)
         (_job_dir(job_id) / "result.md").write_text(result_md, encoding="utf-8")
+        (_job_dir(job_id) / "state.json").write_text(
+            json.dumps(state.model_dump(mode="json"), ensure_ascii=False, indent=2, default=str),
+            encoding="utf-8",
+        )
         meta.update({
             "status": "done",
             "finished_at": _now(),
-            "wall_clock_sec": ctx.get("wall_clock_sec"),
-            "provider": ctx.get("llm_provider"),
-            "model": ctx.get("llm_model_deep"),
+            "workflow": "agentic-langgraph-rag",
+            "provider": state.llm_provider,
+            "model": state.llm_model_deep,
+            "iterations": state.iteration,
+            "final_bias": state.final_decision.bias if state.final_decision else None,
         })
-        logger("Finished successfully in", ctx.get("wall_clock_sec"), "seconds")
+        logger("Finished successfully; final_bias=", meta.get("final_bias"))
     except Exception as exc:
         (_job_dir(job_id) / "error.txt").write_text(
             traceback.format_exc(), encoding="utf-8"
@@ -332,7 +341,7 @@ def home() -> str:
                   <span>🏷️ {escape(job.get('ticker', ''))}</span>
                   <span>⏱️ {escape(job.get('tf', ''))}</span>
                   <span>🗣️ {escape(job.get('lang', ''))}</span>
-                  <span>💬 {escape(str(job.get('debate_rounds', 1)))} round</span>
+                  <span>🧠 {escape(str(job.get('max_iterations', job.get('debate_rounds', 3))))} iter</span>
                   <span>🕒 {_short_time(job.get('created_at', ''))}</span>
                   <span>⚡ {escape(seconds)}s</span>
                 </div>
@@ -348,12 +357,12 @@ def home() -> str:
     body = f"""
     <section class="hero">
       <div class="topbar">
-        <div class="brand"><div class="logo">Au</div><div><h1>GoldDayTrading</h1><p class="muted" style="margin:.25rem 0 0">Multi-agent gold day trading pipeline</p></div></div>
+        <div class="brand"><div class="logo">Au</div><div><h1>GoldDayTrading</h1><p class="muted" style="margin:.25rem 0 0">LangGraph + GraphRAG gold day trading workflow</p></div></div>
       </div>
       <div class="grid">
         <div>
-          <h2>Phân tích vàng bằng nhiều AI agent</h2>
-          <p>Chạy nền full pipeline gốc: analyst đọc dữ liệu, bull/bear tranh luận, research manager tổng hợp, risk manager kiểm tra, day trader xuất kế hoạch.</p>
+          <h2>Phân tích vàng bằng LangGraph + GraphRAG</h2>
+          <p>Chạy workflow agentic mới: LangGraph StateGraph điều phối các node, Macro Agent truy vấn GraphRAG, Risk Manager route vòng phản biện và Memory Consolidator lưu episode lịch sử.</p>
           <div class="chips">
             <span class="chip">Không cần giữ tab mở</span>
             <span class="chip">Tự lưu kết quả</span>
@@ -370,10 +379,10 @@ def home() -> str:
             <label>Ngôn ngữ
               <select name="lang"><option>Vietnamese</option><option>English</option></select>
             </label>
-            <label>Debate rounds <input name="debate_rounds" value="1" inputmode="numeric" /></label>
+            <label>Max iterations <input name="max_iterations" value="3" inputmode="numeric" /></label>
           </div>
-          <div class="submit-row"><button class="btn" type="submit">🚀 Analyze nền</button></div>
-          <p class="muted" style="margin-bottom:0">Job chạy tuần tự để tránh quá tải API. Dùng GC=F nếu XAUUSD=X không có dữ liệu.</p>
+          <div class="submit-row"><button class="btn" type="submit">🚀 Chạy LangGraph + RAG</button></div>
+          <p class="muted" style="margin-bottom:0">Job chạy tuần tự, dùng LangGraph và GraphRAG riêng của instance này. Dùng GC=F nếu XAUUSD=X không có dữ liệu.</p>
         </form>
       </div>
     </section>
@@ -383,7 +392,7 @@ def home() -> str:
         <div class="stat"><span>Tổng job</span><strong>{len(jobs)}</strong></div>
         <div class="stat"><span>Đang chạy/chờ</span><strong>{running_count}</strong></div>
         <div class="stat"><span>Hoàn tất</span><strong>{done_count}</strong></div>
-        <div class="stat"><span>Port</span><strong>3333</strong></div>
+        <div class="stat"><span>Port</span><strong>2222</strong></div>
       </div>
       <div class="panel">
         <h2>Danh sách phân tích</h2>
@@ -398,7 +407,7 @@ def start(
     ticker: str = Query("GC=F"),
     tf: str = Query("15m"),
     lang: str = Query("Vietnamese"),
-    debate_rounds: int = Query(1),
+    max_iterations: int = Query(3),
 ) -> RedirectResponse:
     job_id = uuid.uuid4().hex
     meta = {
@@ -407,12 +416,13 @@ def start(
         "ticker": ticker,
         "tf": tf,
         "lang": lang,
-        "debate_rounds": max(1, min(int(debate_rounds), 3)),
+        "workflow": "agentic-langgraph-rag",
+        "max_iterations": max(1, min(int(max_iterations), 10)),
         "created_at": _now(),
     }
     _write_meta(job_id, meta)
     _append_log(job_id, "Queued")
-    _executor.submit(_run_pipeline_job, job_id)
+    _executor.submit(_run_agentic_job, job_id)
     return RedirectResponse(url=f"job/{job_id}", status_code=303)
 
 
@@ -439,27 +449,27 @@ def job_detail(job_id: str) -> str:
 
     <section class="hero">
       <div class="topbar">
-        <div class="brand"><div class="logo">Au</div><div><h1>Job #{escape(job_id[:8])}</h1><p class="muted" style="margin:.25rem 0 0">Full multi-agent pipeline result</p></div></div>
+        <div class="brand"><div class="logo">Au</div><div><h1>Job #{escape(job_id[:8])}</h1><p class="muted" style="margin:.25rem 0 0">LangGraph + GraphRAG workflow result</p></div></div>
         <span class="badge {escape(status)}">● {status_text}</span>
       </div>
       <div class="stats">
         <div class="stat"><span>Ticker</span><strong>{escape(meta.get('ticker', ''))}</strong></div>
         <div class="stat"><span>Timeframe</span><strong>{escape(meta.get('tf', ''))}</strong></div>
         <div class="stat"><span>Ngôn ngữ</span><strong>{escape(meta.get('lang', ''))}</strong></div>
-        <div class="stat"><span>Debate</span><strong>{escape(str(meta.get('debate_rounds', 1)))} round</strong></div>
+        <div class="stat"><span>Max iterations</span><strong>{escape(str(meta.get('max_iterations', meta.get('debate_rounds', 3))))}</strong></div>
       </div>
       <div class="stats">
         <div class="stat"><span>Created</span><strong>{escape(_short_time(meta.get('created_at', '')))}</strong></div>
         <div class="stat"><span>Started</span><strong>{escape(_short_time(meta.get('started_at', '')) or '—')}</strong></div>
         <div class="stat"><span>Finished</span><strong>{escape(_short_time(meta.get('finished_at', '')) or '—')}</strong></div>
-        <div class="stat"><span>Seconds</span><strong>{escape(str(meta.get('wall_clock_sec', '') or '—'))}</strong></div>
+        <div class="stat"><span>Workflow</span><strong>{escape(str(meta.get('workflow', 'agentic')))}</strong></div>
       </div>
       {('<div class="panel"><h2>Lỗi</h2><pre>' + escape(error or meta.get('error', '')) + '</pre></div>') if error or meta.get('error') else ''}
     </section>
 
     <section class="result-card" style="margin-top:18px; padding:18px">
-      <h2>Kết quả full pipeline</h2>
-      <p class="muted">Bao gồm final plan, risk manager, research manager, bull/bear debate và các analyst report.</p>
+      <h2>Kết quả LangGraph + GraphRAG</h2>
+      <p class="muted">Bao gồm final decision, output từng agent, Risk Manager routing, debate history và GraphRAG memory context nếu được gọi.</p>
       <pre>{escape(result or waiting_text)}</pre>
     </section>
 

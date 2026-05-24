@@ -93,8 +93,8 @@ def data_gatherer_node(state: AgentState) -> Dict[str, Any]:
     - ``debate_history``: 1 message ``role=system`` ghi log đã gather.
     """
     asset = state.asset
-    primary_tf = "15m"          # tham số cứng v1; có thể tham số hoá sau
-    higher_tf = "1h"
+    primary_tf = state.primary_timeframe
+    higher_tf = state.higher_timeframe
     bars_primary = 200
     bars_higher = 120
 
