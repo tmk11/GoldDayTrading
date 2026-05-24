@@ -58,6 +58,23 @@ def _now_utc_str() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
+def _maybe_load_journal(cfg: GDTConfig):
+    """Open the trade journal lazily — never crash the pipeline on
+    a missing / unwritable journal directory; just log and skip."""
+    if not getattr(cfg, "enable_journal", False):
+        return None
+    try:
+        from golddaytrading.backtest.journal import TradeJournal
+        return TradeJournal(cfg.journal_db_path)
+    except Exception as exc:  # pragma: no cover — defensive
+        import logging
+        logging.getLogger(__name__).warning(
+            "Trade journal unavailable (%s) — pipeline will run without "
+            "auto-logging.", exc
+        )
+        return None
+
+
 class DayTradingPipeline:
     """End-to-end gold day-trading analysis pipeline."""
 
@@ -172,6 +189,26 @@ class DayTradingPipeline:
 
         ctx = self._gather_data(ticker)
 
+        # Open the trade journal up front so we can both inject
+        # rolling stats into the RM prompt *and* persist a fresh row
+        # at the end of this run.
+        journal = _maybe_load_journal(cfg)
+        ctx["_journal"] = journal
+        if journal is not None and getattr(cfg, "inject_journal_stats", False):
+            try:
+                ctx["journal_stats_block"] = journal.stats_block(
+                    days_back=int(cfg.journal_stats_days_back),
+                    ticker=ticker,
+                )
+            except Exception as exc:  # pragma: no cover — defensive
+                import logging
+                logging.getLogger(__name__).warning(
+                    "Journal stats unavailable: %s", exc
+                )
+                ctx["journal_stats_block"] = ""
+        else:
+            ctx["journal_stats_block"] = ""
+
         self.log("[agent] technical analyst")
         ctx["technical_report"] = analysts.technical_analyst(ctx, self.llm, cfg)
 
@@ -210,7 +247,19 @@ class DayTradingPipeline:
         ctx["llm_model_deep"] = cfg.deep_llm
         ctx["llm_model_quick"] = cfg.quick_llm
 
-        # Persist the run.
+        # Persist plan into the trade journal — only when we actually
+        # have a chosen idea (skip pure FLAT runs to keep the table
+        # focused on actionable plans).
+        if journal is not None and ctx.get("research_chosen_idea") is not None:
+            try:
+                ctx["journal_plan_id"] = journal.log_plan(ctx)
+            except Exception as exc:  # pragma: no cover — defensive
+                import logging
+                logging.getLogger(__name__).warning(
+                    "Journal log_plan failed: %s", exc
+                )
+
+        # Persist the run as markdown.
         self._save(ctx)
         return ctx
 
@@ -249,6 +298,8 @@ def _render_run_md(ctx: dict, cfg: GDTConfig) -> str:
         "## Bull / Bear debate", ctx.get("debate", {}).get("history", "_skipped_"),
         "## Quant baseline signal", ctx.get("quant_signal_block", "_skipped_"),
         "## Deterministic level pool", ctx.get("level_pool_block", "_skipped_"),
+        "## Trade journal — rolling per-setup stats",
+        ctx.get("journal_stats_block") or "_(no journal stats)_",
         "## Technical analyst", ctx.get("technical_report", "_skipped_"),
         "## Session strategist", ctx.get("session_report", "_skipped_"),
         "## Macro pulse analyst", ctx.get("macro_report", "_skipped_"),

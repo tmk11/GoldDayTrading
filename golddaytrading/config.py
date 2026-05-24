@@ -123,6 +123,19 @@ class GDTConfig:
             os.path.expanduser("~"), ".golddaytrading", "runs"
         )
     )
+    # Path to the SQLite trade journal. The pipeline auto-logs every
+    # plan it produces here so rolling per-setup expectancy can flow
+    # back into prompts on subsequent runs.
+    journal_db_path: str = field(
+        default_factory=lambda: os.path.join(
+            os.path.expanduser("~"), ".golddaytrading", "journal.sqlite3"
+        )
+    )
+    enable_journal: bool = True
+    # When True the pipeline injects a markdown stats block from the
+    # journal into the Research Manager's user prompt.
+    inject_journal_stats: bool = True
+    journal_stats_days_back: int = 30
     debug: bool = False
 
     def to_dict(self) -> dict:
@@ -165,7 +178,13 @@ def load_config(**overrides) -> GDTConfig:
         output_language=os.environ.get("GDT_OUTPUT_LANGUAGE", "English"),
         debug=_env_bool("GDT_DEBUG", False),
         vwap_anchor_hour_utc=_env_int("GDT_VWAP_ANCHOR_HOUR_UTC", 22),
+        enable_journal=_env_bool("GDT_ENABLE_JOURNAL", True),
+        inject_journal_stats=_env_bool("GDT_INJECT_JOURNAL_STATS", True),
+        journal_stats_days_back=_env_int("GDT_JOURNAL_STATS_DAYS_BACK", 30),
     )
+    journal_path_env = os.environ.get("GDT_JOURNAL_DB_PATH")
+    if journal_path_env:
+        cfg.journal_db_path = journal_path_env
 
     # When no API key is found and the user did not explicitly pick
     # ``offline``, downgrade to ``offline`` so the pipeline still runs

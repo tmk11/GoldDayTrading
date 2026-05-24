@@ -2,6 +2,72 @@
 
 All notable changes to GoldDayTrading.
 
+## [0.3.0] - 2026-05-24
+
+P2 — backtest harness and trade journal. The deterministic level-pool
++ quant-baseline foundation now has a way to *measure* its edge and
+feed empirical per-setup expectancy back into the LLM prompts.
+
+### Added
+- **Walk-forward backtest engine** (`backtest/replay.py`,
+  `backtest/outcomes.py`, `backtest/stats.py`). Replays the
+  deterministic half of the pipeline (indicators → quant signal →
+  level pool) over historical OHLCV, simulates each idea's outcome
+  with a conservative same-bar resolution rule (stop wins ties), and
+  produces grouped stats (win-rate, expectancy, Sharpe-R, max DD,
+  profit factor) by `setup_id`, `session`, `htf_trend`, and
+  `resolution`. Three strategies: `best_idea` (top-ranked only,
+  matches the live pipeline), `all_ideas` (full pool, more samples),
+  and `p_up_aligned` (only ideas whose bias agrees with the quant
+  prior). Supports HTF resampling for the level-pool ranker.
+- **SQLite trade journal** (`backtest/journal.py`) — auto-logs every
+  plan emitted by the live pipeline (chosen idea, guardrail outcome,
+  quant signal, regime, session, HTF trend) and lets the trader
+  record realised outcomes. The `stats_block` rendering is injected
+  into the Research Manager's prompt on subsequent runs so the LLM
+  reasons against *empirical* per-setup edge, not just the
+  hand-calibrated quant prior.
+- **Pipeline auto-logging** — when `cfg.enable_journal` is True
+  (default) and a research-chosen idea exists, every run persists a
+  row to `~/.golddaytrading/journal.sqlite3` (or
+  `$GDT_JOURNAL_DB_PATH`). Failures degrade silently — the journal
+  never blocks a run.
+- **CLI**: `gdt backtest` and `gdt journal {stats,list,record,path}`.
+  `gdt backtest XAUUSD=X --tf 15m --bars 2000 --strategy best_idea`
+  fetches via yfinance and prints the full grouped report.
+  `gdt journal stats --days 30` prints the markdown block the
+  pipeline injects into prompts.
+- **New config fields** (with `GDT_*` env-var counterparts):
+  `enable_journal`, `inject_journal_stats`, `journal_db_path`,
+  `journal_stats_days_back`.
+- **Test suite expanded to 74 tests** (`tests/test_p2_backtest.py`):
+  outcome simulator (entry trigger, stop priority, same-bar tie
+  resolution, expired R math), replay determinism, stats
+  aggregation, group-by min_n filter, drawdown sign, journal
+  schema lifecycle (log, record, latest-outcome semantics, reset),
+  end-to-end auto-log from the offline pipeline.
+
+### Changed
+- `RESEARCH_MANAGER` prompt now lists journal stats as a fourth
+  input (alongside analyst reports, debate, level pool, quant
+  signal) and treats it as a Bayesian prior — high-edge setups
+  get a tailwind, but the model is told that recent edge is not
+  a guarantee.
+- `_render_run_md` includes the trade-journal stats block in the
+  per-run markdown for audit.
+- The pipeline's `run()` method now opens the journal once at start
+  and uses the same handle for both stats injection and the final
+  log_plan call.
+
+### Known limitations (P3 territory)
+- The backtest passes `macro_pulse={}` — replaying historical macro
+  is left to a future P3 ingest (Polygon / Databento). Live runs
+  still get the full macro pulse.
+- The journal's `stats_block` reconstructs `TradeOutcome` objects
+  from DB rows; HTF trend / regime fields persist correctly but
+  ATR-based fields are not stored (they were never needed for the
+  group-bys we surface).
+
 ## [0.2.0] - 2026-05-24
 
 Major accuracy / correctness pass on the day-trading pipeline. The

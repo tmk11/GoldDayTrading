@@ -37,6 +37,9 @@ def _analyst_pack(ctx: dict) -> str:
     quant_block = ctx.get("quant_signal_block")
     if quant_block:
         parts.extend(["## Quant baseline", quant_block])
+    journal_block = ctx.get("journal_stats_block")
+    if journal_block:
+        parts.extend(["## Trade journal — rolling per-setup stats", journal_block])
     return "\n\n".join(parts)
 
 

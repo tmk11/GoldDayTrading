@@ -151,6 +151,41 @@ gdt info               # current session, macro pulse, calendar
 gdt info GC=F
 ```
 
+### `backtest` — measure the deterministic edge
+
+Walks forward through historical bars, builds the level pool at each
+step, simulates each idea's outcome, and prints win-rate /
+expectancy / Sharpe-R per setup, per session, and per HTF trend. No
+LLM calls, fully deterministic.
+
+```bash
+gdt backtest XAUUSD=X --tf 15m --bars 2000 --strategy best_idea
+gdt backtest GC=F --tf 1h  --bars 1500 --strategy all_ideas
+```
+
+`--strategy` can be `best_idea` (top-ranked only, matches live),
+`all_ideas` (the whole pool — more samples for stats), or
+`p_up_aligned` (only ideas whose bias matches the quant prior).
+
+### `journal` — empirical edge from your live runs
+
+The pipeline auto-logs every plan it produces to a SQLite journal
+at `~/.golddaytrading/journal.sqlite3`. Once you've recorded
+outcomes, the rolling per-setup stats are injected back into the
+Research Manager's prompt so the LLM applies Bayesian reasoning.
+
+```bash
+# After a trade resolves, mark its outcome:
+gdt journal record 42 --resolution tp1 --realised-r 2.0 --notes "VWAP reclaim"
+gdt journal record 41 --resolution stop --realised-r -1.0
+gdt journal record 40 --resolution expired --realised-r 0.4
+
+# Inspect rolling 30-day stats:
+gdt journal stats --days 30
+gdt journal list --limit 10
+gdt journal path
+```
+
 ---
 
 ## Python API
@@ -202,6 +237,11 @@ useful ones; see [`.env.example`](.env.example) for the full list.
 | `GDT_OUTPUT_LANGUAGE`       | `English`   | Output language for the final plan   |
 | `GDT_DEBATE_ROUNDS`         | `1`         | Bull/Bear debate rounds              |
 | `GDT_ENABLE_ECON_CALENDAR`  | `1`         | Toggle economic-calendar lookup      |
+| `GDT_VWAP_ANCHOR_HOUR_UTC`  | `22`        | UTC hour at which session VWAP resets (5pm NY = 22) |
+| `GDT_ENABLE_JOURNAL`        | `1`         | Auto-log every plan to the SQLite journal |
+| `GDT_INJECT_JOURNAL_STATS`  | `1`         | Feed rolling per-setup stats into the RM prompt |
+| `GDT_JOURNAL_STATS_DAYS_BACK` | `30`      | Rolling window for stats injection   |
+| `GDT_JOURNAL_DB_PATH`       | `~/.golddaytrading/journal.sqlite3` | Override journal file path |
 
 ---
 
