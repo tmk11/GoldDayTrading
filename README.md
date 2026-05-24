@@ -153,7 +153,10 @@ START → data_gatherer → technical_agent → macro_news_agent → risk_manage
               ▼                                                   │
        (vòng phản biện)                                           │
                                                                   ▼
-                                                                 END  ◀── finalize
+                                                         memory_consolidator
+                                                                  │
+                                                                  ▼
+                                                                 END
 ```
 
 * `data_gatherer` — pure Python, fetch OHLCV + macro pulse + lịch
@@ -168,6 +171,8 @@ START → data_gatherer → technical_agent → macro_news_agent → risk_manage
   `RiskManagerVerdict` để **chọn**: hoặc `finalize` (phát
   `FinalDecision`), hoặc `route_back` (chỉ định node nào quay lại
   + câu hỏi cụ thể).
+* `memory_consolidator` — pure Python, không LLM. Chạy ngay trước
+  `END` để ghi episode vào Graph RAG (xem mục Self-Learning bên dưới).
 
 ### Graph RAG (bộ nhớ lịch sử)
 
@@ -209,6 +214,48 @@ episode = build_episode_from_macro_pulse(
 rag.ingest_episode(episode)
 print(rag.stats())
 ```
+
+### Self-Learning loop (auto-ingest mỗi run)
+
+Workflow agentic tự động học từ chính các quyết định của nó. Sau
+khi Risk Manager phát hành `FinalDecision`, node `memory_consolidator`
+chạy ngay trước `END`:
+
+* Build một `HistoricalEpisode` từ state đã hoàn chỉnh:
+  * **narrative** ngắn gồm regime, macro deltas (DXY/US10Y/VIX
+    1h), gold price, session, HTF trend, bias + entry/stop;
+  * **entity_nodes** = `[GOLD, DXY, US10Y, VIX]` + event KG nodes
+    (CPI/NFP/FOMC) khi sự kiện high-impact đang ở < 4h;
+  * **metadata** primitive (regime, bias, confidence, entry, RR,
+    rsi14, atr14, vwap, macd_hist…) — phục vụ filter sau này.
+* Ingest qua `GraphRAG.ingest_episode()` → embed bằng OpenAI API
+  → upsert ChromaDB → persist KG.
+* Nếu Chroma/embedding API timeout → bắt exception, log
+  `errors`, vẫn return `final_decision` bình thường.
+
+Sau N run, Macro Agent ở các phiên sau gọi
+`query_historical_context` sẽ retrieve được chính các episode
+trước đó → workflow trở nên ngày càng "kinh nghiệm".
+
+### `gdt agentic-info` — visibility cho bộ nhớ
+
+Command CLI mới (không gọi LLM) để inspect Graph RAG:
+
+```bash
+gdt agentic-info                          # chỉ stats
+gdt agentic-info --sample 5               # + 5 episode mới nhất
+gdt agentic-info --sample 20 --top-connected 5
+```
+
+Output gồm:
+
+* **Overview**: persist dir, tổng node/edge KG, tổng episode Chroma.
+* **KG node types** (asset / macro / event / derived / auto).
+* **KG relation types** (inverse / drives / leads_by_30m / …).
+* **Top-connected nodes** (degree = in + out) — thường là `GOLD`,
+  `DXY`, `REAL_YIELD`, `FOMC_release`.
+* **Sample episodes** (khi `--sample N > 0`): timestamp, regime,
+  bias, confidence, narrative, entities, metadata.
 
 ---
 

@@ -269,6 +269,24 @@ class AgentState(BaseModel):
     news_block: Optional[str] = None
     calendar_block: Optional[str] = None
 
+    # Macro scalar đã extract sẵn (dùng cho Memory Consolidator để
+    # tạo narrative gọn cho Graph RAG, KHÔNG phải re-fetch).
+    macro_regime: Optional[str] = Field(
+        None,
+        description=(
+            "Regime tag deterministic từ fetch_macro_pulse: "
+            "REAL_YIELD_DRIVE / USD_WEAKNESS / RISK_OFF_HAVEN_BID / "
+            "GROWTH_SCARE / RISK_ON / RANGE_BOUND."
+        ),
+    )
+    macro_scalars: Dict[str, float] = Field(
+        default_factory=dict,
+        description=(
+            "VD: {'dxy_chg_1h': -0.32, 'tnx_chg_1h': 0.05, "
+            "'vix_chg_1h': -0.4, 'gold_chg_1h': 0.18}."
+        ),
+    )
+
     # ------- Output từ các agent (tích luỹ qua các vòng) -------
     agent_outputs: Annotated[
         Dict[str, AgentOutput], _merge_agent_outputs
