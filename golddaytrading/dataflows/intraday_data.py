@@ -70,8 +70,15 @@ def fetch_intraday_ohlcv(
     period = _TF_TO_PERIOD.get(fetch_interval, "60d")
 
     try:
-        df = yf.Ticker(ticker).history(
-            period=period, interval=fetch_interval, auto_adjust=False
+        df = yf.download(
+            ticker,
+            period=period,
+            interval=fetch_interval,
+            auto_adjust=False,
+            progress=False,
+            threads=False,
+            timeout=10,
+            multi_level_index=False,
         )
     except Exception as exc:
         logger.warning("yfinance history failed for %s @ %s: %s",
