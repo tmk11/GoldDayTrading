@@ -27,6 +27,11 @@ GOLD_TICKERS: tuple[str, ...] = (
 
 # Macro tickers polled by the Macro Pulse Analyst on intraday cadence.
 # All available on yfinance; no API key required.
+#
+# This is the legacy v0.1 set, kept for back-compat with anything
+# that imports it. The richer driver list lives in
+# :data:`golddaytrading.dataflows.macro_pulse.DRIVERS`, which extends
+# this with EURUSD, ^FVX, BTC, CL, SI for proper regime classification.
 MACRO_PULSE_TICKERS: tuple[str, ...] = (
     "DX-Y.NYB",   # DXY (US dollar index) - direct gold inverse
     "^TNX",       # 10Y nominal Treasury yield - opportunity-cost driver
@@ -34,6 +39,11 @@ MACRO_PULSE_TICKERS: tuple[str, ...] = (
     "TIP",        # TIPS ETF - inverse real-yield proxy
     "^TYX",       # 30Y Treasury yield - long-duration check
     "ES=F",       # S&P 500 futures - risk-on/off context
+    "^FVX",       # 5Y Treasury yield - Fed-policy expectations
+    "EURUSD=X",   # EUR/USD - 57% of DXY weight
+    "BTC-USD",    # Bitcoin - alt store of value
+    "CL=F",       # WTI crude - inflation + risk asset
+    "SI=F",       # Silver futures - lead/lag for gold
 )
 
 
@@ -94,6 +104,11 @@ class GDTConfig:
     preferred_sessions: List[str] = field(
         default_factory=lambda: ["LONDON", "LONDON_NY_OVERLAP", "NEW_YORK"]
     )
+    # UTC hour at which the anchored "session VWAP" resets. The desk
+    # convention for spot gold and FX is the 5pm NY close => 22 UTC
+    # (or 21 UTC during US DST). Setting this to 0 reverts to the
+    # legacy UTC-midnight behaviour.
+    vwap_anchor_hour_utc: int = 22
 
     # ---- Debate / agents ----
     debate_rounds: int = 1                    # bull/bear rounds (1 is enough intraday)
@@ -149,6 +164,7 @@ def load_config(**overrides) -> GDTConfig:
         enable_sentiment=_env_bool("GDT_ENABLE_SENTIMENT", True),
         output_language=os.environ.get("GDT_OUTPUT_LANGUAGE", "English"),
         debug=_env_bool("GDT_DEBUG", False),
+        vwap_anchor_hour_utc=_env_int("GDT_VWAP_ANCHOR_HOUR_UTC", 22),
     )
 
     # When no API key is found and the user did not explicitly pick

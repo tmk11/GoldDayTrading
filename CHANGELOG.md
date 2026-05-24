@@ -2,6 +2,90 @@
 
 All notable changes to GoldDayTrading.
 
+## [0.2.0] - 2026-05-24
+
+Major accuracy / correctness pass on the day-trading pipeline. The
+core change is **the LLM no longer invents trade prices** — entries,
+stops, and targets now come from a deterministic level pool, and the
+Research Manager's role is to *select* across pre-computed setups.
+
+### Fixed (P0 — bugs that quietly degraded every run)
+- **Risk-manager prompt construction** previously dropped the entire
+  account / risk / blackout context whenever any guardrail field
+  was `None` (a Python operator-precedence bug — `if/else` ternary
+  applied to the whole concatenated f-string sequence rather than
+  the one line). The prompt is now built from a list of strings,
+  with N/A-fallback computed per line.
+- **`_extract_level`** now parses prices with thousands separators
+  and currency prefixes (`$2,345.60`, `2,345`, `~2345`), which LLMs
+  emit constantly in markdown. Previously these silently failed and
+  the pipeline produced a SKIP from a parseable plan.
+- **Session VWAP** now anchors at 22:00 UTC (the 5pm New York close,
+  the FX-desk convention) instead of UTC midnight, and is configurable
+  via `GDT_VWAP_ANCHOR_HOUR_UTC`. With `Volume == 0` (the spot-FX
+  case) it falls back to a session-anchored typical-price mean rather
+  than silently turning into a meaningless 1-volume mean weighted by
+  the first bar.
+
+### Added (P1 — accuracy improvements)
+- **Quantitative baseline signal** (`signals/quant_baseline.py`) — a
+  pure-numpy, calibrated logistic-regression-style scorer producing
+  `P(up)`, expected move in ATR units, confidence, and a top-driver
+  feature breakdown. Pre-calibrated coefficients encode established
+  gold-trading priors (DXY inverse, real-yield drag, RSI extremes
+  mean-revert, EMA stack momentum). Output is rendered as a prompt
+  block fed to the technical analyst, debate, and Research Manager.
+- **Deterministic trade-level pool** (`signals/levels.py`) generates
+  up to eight candidate setups (VWAP reclaim/rejection, opening-range
+  breakout/breakdown, pivot bounce/rejection, Bollinger mean-reversion
+  long/short), each with prices anchored to the indicator snapshot,
+  validated for geometry, screened by minimum R:R, and scored using
+  the higher-timeframe trend and quant prior.
+- **Structured Research Manager output** (`signals/envelope.py`) —
+  the RM emits a fenced JSON envelope with `bias`, `conviction`,
+  `selected_setup_id`, and `rationale`. The pipeline parses it,
+  resolves the selected id against the pool, and downgrades to FLAT
+  on hallucinations. The Risk Manager now consumes deterministic
+  prices from the chosen `TradeIdea` directly, bypassing free-form
+  text parsing on the happy path. Offline / parse-failure runs fall
+  back to the highest-ranked pool idea so the pipeline stays
+  deterministic end-to-end.
+- **Extended indicator battery** — Bollinger Bands(20, 2) with
+  bandwidth ("squeeze") detector, Stochastic(14, 3, 3), Camarilla
+  pivots, weekly + monthly floor pivots, fractal swing-high/low
+  detection, anchored VWAP from the most recent swing high *and*
+  swing low. Opening range now anchors on the same NY-close session
+  boundary as Session VWAP.
+- **Extended macro pulse** — added EURUSD, ^FVX (5Y yield), CL=F
+  (crude), BTC-USD, SI=F (silver). Derived series: real-yield proxy
+  (inverse of TIP) and 5Y-vs-10Y belly slope.
+- **Macro regime classifier** with six regimes
+  (`REAL_YIELD_DRIVE`, `USD_WEAKNESS`, `RISK_OFF_HAVEN_BID`,
+  `GROWTH_SCARE`, `RISK_ON`, `RANGE_BOUND`); the regime tag drives
+  the gold-bias mapping rather than a naive sum of individual driver
+  biases. Regime feeds back into the quant baseline as a feature
+  with a +0.50 coefficient.
+- **Refined prompts** — Macro Pulse Analyst leads with the regime
+  tag; Research Manager is required to select from the level pool
+  (or return FLAT) and emit JSON; Risk Manager is told to quote the
+  guardrail-computed numbers verbatim and never widen a stop to
+  fabricate R:R.
+- **Test suite** — 48 tests across `test_smoke.py`,
+  `test_p0_bugfixes.py` (regression coverage for the three bugs),
+  and `test_p1_signals.py` (quant baseline sensitivity, level-pool
+  geometry / filtering / ranking, envelope parsing including
+  hallucination downgrade, regime classifier across all buckets,
+  end-to-end pipeline determinism).
+
+### Changed
+- `compute_indicators(df, vwap_anchor_hour_utc=22)` — new optional
+  argument, threaded from `GDTConfig.vwap_anchor_hour_utc`.
+- `compute_guardrails(..., chosen_idea=None)` — new optional
+  argument; when provided, the deterministic levels skip regex
+  parsing entirely.
+- `MACRO_PULSE_TICKERS` extended with `^FVX`, `EURUSD=X`, `BTC-USD`,
+  `CL=F`, `SI=F`.
+
 ## [0.1.0] - 2026-05-23
 
 Initial release. Adapted from

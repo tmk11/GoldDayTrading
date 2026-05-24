@@ -48,6 +48,10 @@ from golddaytrading.dataflows.macro_pulse import (
 )
 from golddaytrading.llm.client import LLMClient, build_client
 from golddaytrading.sessions import classify_session, session_summary_block
+from golddaytrading.signals.levels import build_level_pool, level_pool_block
+from golddaytrading.signals.quant_baseline import (
+    compute_quant_signal, quant_signal_block,
+)
 
 
 def _now_utc_str() -> str:
@@ -79,8 +83,10 @@ class DayTradingPipeline:
             ticker, cfg.higher_timeframe, cfg.lookback_bars_higher,
         )
 
-        primary_ind = compute_indicators(primary_df) if primary_df is not None else {}
-        higher_ind = compute_indicators(higher_df) if higher_df is not None else {}
+        primary_ind = (compute_indicators(primary_df, vwap_anchor_hour_utc=cfg.vwap_anchor_hour_utc)
+                       if primary_df is not None else {})
+        higher_ind = (compute_indicators(higher_df, vwap_anchor_hour_utc=cfg.vwap_anchor_hour_utc)
+                      if higher_df is not None else {})
 
         self.log("[fetch] macro pulse (DXY / yields / VIX / TIP / ES)")
         macro = fetch_macro_pulse()
@@ -97,6 +103,33 @@ class DayTradingPipeline:
         else:
             events = []
 
+        # Determine higher-timeframe trend label for the level-pool
+        # ranker. We use the EMA stack on the higher TF as a simple
+        # deterministic regime tag.
+        htf_trend: Optional[str] = None
+        if higher_ind:
+            ema20_h = float(higher_ind["ema20"].iloc[-1])
+            ema50_h = float(higher_ind["ema50"].iloc[-1])
+            ema200_h = float(higher_ind["ema200"].iloc[-1])
+            if ema20_h > ema50_h > ema200_h:
+                htf_trend = "up"
+            elif ema20_h < ema50_h < ema200_h:
+                htf_trend = "down"
+            else:
+                htf_trend = "chop"
+
+        active_session = classify_session()
+        quant_signal = compute_quant_signal(
+            primary_df, primary_ind, macro,
+            session_name=active_session.name,
+        )
+        level_pool = build_level_pool(
+            primary_df, primary_ind,
+            min_rr=cfg.min_rr,
+            htf_trend=htf_trend,
+            quant_p_up=quant_signal.p_up if quant_signal else None,
+        )
+
         return {
             "ticker": ticker,
             "now_utc": datetime.now(timezone.utc),
@@ -107,6 +140,10 @@ class DayTradingPipeline:
             "macro_pulse": macro,
             "news_raw": news,
             "upcoming_events": events,
+            "htf_trend": htf_trend,
+            "active_session": active_session,
+            "quant_signal": quant_signal,
+            "level_pool": level_pool,
             # Pre-rendered prompt blocks (cheaper to pass to multiple agents)
             "session_block": session_summary_block(),
             "price_block": latest_price_block(ticker, primary_df),
@@ -120,6 +157,8 @@ class DayTradingPipeline:
             "macro_pulse_block": macro_pulse_block(macro),
             "news_block": gold_news_block(news, hours_back=12),
             "calendar_block": calendar_block(events),
+            "quant_signal_block": quant_signal_block(quant_signal),
+            "level_pool_block": level_pool_block(level_pool, ticker=ticker),
         }
 
     # ------------------------------------------------------------------
@@ -204,8 +243,12 @@ def _render_run_md(ctx: dict, cfg: GDTConfig) -> str:
         f"_Wall clock: {ctx.get('wall_clock_sec')}s_\n",
         "## Final plan", ctx.get("final_plan", "_skipped_"),
         "## Risk-manager report", ctx.get("risk_report", "_skipped_"),
+        "## Research-manager structured decision",
+        ctx.get("research_envelope_block", "_skipped_"),
         "## Research-manager synthesis", ctx.get("research_plan", "_skipped_"),
         "## Bull / Bear debate", ctx.get("debate", {}).get("history", "_skipped_"),
+        "## Quant baseline signal", ctx.get("quant_signal_block", "_skipped_"),
+        "## Deterministic level pool", ctx.get("level_pool_block", "_skipped_"),
         "## Technical analyst", ctx.get("technical_report", "_skipped_"),
         "## Session strategist", ctx.get("session_report", "_skipped_"),
         "## Macro pulse analyst", ctx.get("macro_report", "_skipped_"),

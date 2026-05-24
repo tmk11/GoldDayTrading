@@ -32,6 +32,7 @@ def technical_analyst(ctx: dict, llm: LLMClient, cfg: GDTConfig) -> str:
         ctx.get("ohlcv_block", ""),
         ctx.get("indicator_block", ""),
         ctx.get("higher_indicator_block", ""),
+        ctx.get("quant_signal_block", ""),
         "Produce your structured technical read now.",
     ])
     return llm.complete(
