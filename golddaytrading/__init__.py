@@ -24,4 +24,4 @@ no API key is configured, so the smoke pipeline always runs.
 from golddaytrading.config import GDTConfig, load_config  # noqa: F401
 from golddaytrading.graph.pipeline import DayTradingPipeline  # noqa: F401
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

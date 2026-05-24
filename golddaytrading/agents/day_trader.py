@@ -26,6 +26,8 @@ def day_trader(ctx: dict, llm: LLMClient, cfg: GDTConfig) -> str:
         f"Ticker: `{ctx['ticker']}`  |  Now: {ts}\n\n"
         "## Research-manager plan\n"
         + ctx.get("research_plan", "_skipped_")
+        + "\n\n"
+        + ctx.get("research_envelope_block", "")
         + "\n\n## Risk-manager report\n"
         + ctx.get("risk_report", "_skipped_")
         + "\n\n## Deterministic guardrail bundle\n"
