@@ -48,6 +48,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 TradingBias = Literal["LONG", "SHORT", "NEUTRAL"]
+FinalAction = Literal["LONG", "SHORT", "NO_TRADE"]
 """Hướng giao dịch cuối cùng. Dùng `NEUTRAL` thay cho `FLAT` để
 khớp với gợi ý trong yêu cầu bài toán; mapping sang pipeline cũ:
 NEUTRAL = FLAT (không vào lệnh).
@@ -148,11 +149,61 @@ class AgentOutput(BaseModel):
     )
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
+class DebateCase(BaseModel):
+    """Lightweight bull/bear case used as an advisory debate layer."""
+
+    side: Literal["bull", "bear"]
+    thesis: str = Field(..., description="Bullish/bearish thesis, concise markdown.")
+    supporting_evidence: List[str] = Field(default_factory=list)
+    required_confirmation: str = ""
+    invalidation_level: Optional[float] = None
+    risk_factors: List[str] = Field(default_factory=list)
+    confidence: float = Field(0.0, ge=0.0, le=1.0)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    @field_validator("supporting_evidence", "risk_factors", mode="before")
+    @classmethod
+    def _listify(cls, value):
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [value]
+        return value
+
+    @field_validator("required_confirmation", mode="before")
+    @classmethod
+    def _stringify_confirmation(cls, value):
+        if isinstance(value, list):
+            return "; ".join(str(item) for item in value)
+        if value is None:
+            return ""
+        return str(value)
+
+    @field_validator("invalidation_level", mode="before")
+    @classmethod
+    def _parse_invalidation_level(cls, value):
+        if value is None or isinstance(value, (int, float)):
+            return value
+        text = str(value)
+        import re
+        match = re.search(r"\d+(?:\.\d+)?", text.replace(",", ""))
+        return float(match.group(0)) if match else None
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def _normalize_confidence(cls, value):
+        if isinstance(value, (int, float)) and value > 1:
+            return float(value) / 100.0
+        return value
+
 
 class DebateMessage(BaseModel):
     """Một thông điệp trong lịch sử debate / self-reflection."""
 
-    role: Literal["technical", "macro_news", "risk_manager", "system"]
+    role: Literal[
+        "technical", "macro_news", "bull_case", "bear_case",
+        "risk_manager", "system",
+    ]
     content: str
     iteration: int = Field(0, ge=0, description="Vòng lặp graph khi message phát sinh.")
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -168,14 +219,21 @@ class FinalDecision(BaseModel):
     """
 
     bias: TradingBias
+    final_action: FinalAction = "NO_TRADE"
     confidence: float = Field(..., ge=0.0, le=1.0)
+    confidence_score: int = Field(0, ge=0, le=100)
     rationale: str = Field(..., description="Tóm tắt lý do <= 200 từ.")
     entry: Optional[float] = None
     stop_loss: Optional[float] = None
     take_profit_1: Optional[float] = None
+    take_profit: Optional[float] = None
     take_profit_2: Optional[float] = None
     rr_ratio: Optional[float] = None
+    risk_reward: Optional[float] = None
     position_size_units: Optional[float] = None
+    position_size_recommendation: Optional[str] = None
+    reasons: List[str] = Field(default_factory=list)
+    conditions_to_cancel_trade: List[str] = Field(default_factory=list)
     time_in_force_minutes: Optional[int] = Field(
         None, ge=1,
         description="Tối đa giữ lệnh (phút). None = đến hết phiên NY.",
@@ -188,6 +246,26 @@ class FinalDecision(BaseModel):
 
     @model_validator(mode="after")
     def _check_geometry(self) -> "FinalDecision":
+        self.final_action = "NO_TRADE" if self.bias == "NEUTRAL" else self.bias
+        self.confidence_score = int(round(self.confidence * 100))
+        if self.take_profit is None:
+            self.take_profit = self.take_profit_1
+        if self.risk_reward is None:
+            self.risk_reward = self.rr_ratio
+        if self.position_size_recommendation is None:
+            if self.position_size_units is not None:
+                self.position_size_recommendation = f"{self.position_size_units} units"
+            else:
+                self.position_size_recommendation = "Use configured risk-per-trade; no size increase from conviction."
+        if not self.reasons:
+            self.reasons = [self.rationale]
+        if not self.conditions_to_cancel_trade:
+            if self.bias == "LONG" and self.stop_loss is not None:
+                self.conditions_to_cancel_trade = [f"Cancel/exit if price accepts below {self.stop_loss:.2f}."]
+            elif self.bias == "SHORT" and self.stop_loss is not None:
+                self.conditions_to_cancel_trade = [f"Cancel/exit if price accepts above {self.stop_loss:.2f}."]
+            else:
+                self.conditions_to_cancel_trade = ["No trade until confirmation and risk/reward conditions are met."]
         # NEUTRAL không cần entry/stop.
         if self.bias == "NEUTRAL":
             return self
@@ -293,6 +371,11 @@ class AgentState(BaseModel):
     agent_outputs: Annotated[
         Dict[str, AgentOutput], _merge_agent_outputs
     ] = Field(default_factory=dict)
+
+    bull_case: Optional[DebateCase] = None
+    bear_case: Optional[DebateCase] = None
+    debate_required: bool = False
+    debate_reason: str = ""
 
     # ------- Lịch sử debate / self-reflection -------
     debate_history: Annotated[List[DebateMessage], operator.add] = Field(

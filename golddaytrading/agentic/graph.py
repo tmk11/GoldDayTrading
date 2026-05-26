@@ -51,6 +51,8 @@ import logging
 from typing import Optional
 
 from golddaytrading.agentic.nodes import (
+    bear_case_agent_node,
+    bull_case_agent_node,
     data_gatherer_node,
     macro_news_agent_node,
     memory_consolidator_node,
@@ -65,6 +67,47 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Conditional router
 # ---------------------------------------------------------------------------
+
+def debate_router(state: AgentState) -> str:
+    """Decide whether the lightweight bull/bear debate should run."""
+    tech = state.agent_outputs.get("technical")
+    macro = state.agent_outputs.get("macro_news")
+    reasons = []
+
+    confidences = [out.confidence for out in (tech, macro) if out is not None]
+    if any(0.50 <= confidence <= 0.75 for confidence in confidences):
+        reasons.append("signal confidence is between 50 and 75")
+
+    if tech and macro and tech.bias != macro.bias and "NEUTRAL" not in (tech.bias, macro.bias):
+        reasons.append("technical and macro agents disagree")
+
+    if _price_near_key_level(state):
+        reasons.append("price is near key support/resistance")
+
+    if any(event.impact == "High" and 0 <= event.minutes_until() <= 240 for event in state.macro_events):
+        reasons.append("high-impact news is detected")
+
+    if reasons:
+        state.debate_required = True
+        state.debate_reason = "; ".join(reasons)
+        logger.info("Bull/bear debate enabled: %s", state.debate_reason)
+        return "bull_case_agent"
+    state.debate_required = False
+    state.debate_reason = ""
+    return "risk_manager"
+
+def _price_near_key_level(state: AgentState) -> bool:
+    md = state.market_data
+    tech = state.agent_outputs.get("technical")
+    if not md or md.last_price is None or not tech or not tech.key_levels:
+        return False
+    atr = (md.indicators or {}).get("atr14") or 0.0
+    tolerance = max(float(md.last_price) * 0.0015, float(atr or 0.0) * 0.5, 1.0)
+    for key, level in tech.key_levels.items():
+        if any(token in key.lower() for token in ("entry", "stop", "tp", "support", "resistance", "level")):
+            if abs(float(level) - float(md.last_price)) <= tolerance:
+                return True
+    return False
 
 
 def risk_router(state: AgentState) -> str:
@@ -124,6 +167,8 @@ def build_graph(checkpointer: Optional[object] = None):
     graph.add_node("data_gatherer", data_gatherer_node)
     graph.add_node("technical_agent", technical_agent_node)
     graph.add_node("macro_news_agent", macro_news_agent_node)
+    graph.add_node("bull_case_agent", bull_case_agent_node)
+    graph.add_node("bear_case_agent", bear_case_agent_node)
     graph.add_node("risk_manager", risk_manager_node)
     graph.add_node("memory_consolidator", memory_consolidator_node)
 
@@ -131,7 +176,16 @@ def build_graph(checkpointer: Optional[object] = None):
     graph.add_edge(START, "data_gatherer")
     graph.add_edge("data_gatherer", "technical_agent")
     graph.add_edge("technical_agent", "macro_news_agent")
-    graph.add_edge("macro_news_agent", "risk_manager")
+    graph.add_conditional_edges(
+        "macro_news_agent",
+        debate_router,
+        {
+            "bull_case_agent": "bull_case_agent",
+            "risk_manager": "risk_manager",
+        },
+    )
+    graph.add_edge("bull_case_agent", "bear_case_agent")
+    graph.add_edge("bear_case_agent", "risk_manager")
     graph.add_edge("memory_consolidator", END)
 
     # 3. Conditional edge sau Risk Manager

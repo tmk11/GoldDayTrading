@@ -138,6 +138,22 @@ def render_final_report(state: AgentState) -> str:
         lines.append(out.summary)
         lines.append("")
 
+    if state.bull_case or state.bear_case:
+        lines.append("## Bull/Bear Debate (ngắn gọn)\n")
+        for title, case in (("Bull Case", state.bull_case), ("Bear Case", state.bear_case)):
+            if not case:
+                continue
+            lines.append(f"### {title}")
+            lines.append(f"- thesis: {case.thesis}")
+            if case.supporting_evidence:
+                lines.append("- evidence: " + "; ".join(case.supporting_evidence[:4]))
+            lines.append(f"- confirmation: {case.required_confirmation}")
+            if case.invalidation_level is not None:
+                lines.append(f"- invalidation: `{case.invalidation_level:.2f}`")
+            if case.risk_factors:
+                lines.append("- risks: " + "; ".join(case.risk_factors[:4]))
+            lines.append("")
+
     # Final decision
     lines.append("## Quyết định cuối\n")
     fd = state.final_decision
@@ -145,21 +161,30 @@ def render_final_report(state: AgentState) -> str:
         lines.append("_(không có — workflow kết thúc bất thường)_")
     else:
         lines.append(
-            f"- **Bias:** `{fd.bias}`  ·  **Confidence:** `{fd.confidence:.2f}`"
+            f"- **Final action:** `{fd.final_action}`  ·  "
+            f"**Confidence score:** `{fd.confidence_score}/100`"
         )
+        lines.append(f"- **Bias:** `{fd.bias}`  ·  **Confidence:** `{fd.confidence:.2f}`")
         if fd.bias != "NEUTRAL":
             lines.append(
                 f"- Entry `{fd.entry:.2f}` · Stop `{fd.stop_loss:.2f}` · "
-                f"TP1 `{fd.take_profit_1:.2f}`"
+                f"Take profit `{(fd.take_profit or fd.take_profit_1):.2f}`"
                 + (f" · TP2 `{fd.take_profit_2:.2f}`"
                    if fd.take_profit_2 is not None else "")
             )
-            if fd.rr_ratio is not None:
-                lines.append(f"- R:R = `{fd.rr_ratio:.2f}`")
-            if fd.position_size_units is not None:
-                lines.append(f"- Size = `{fd.position_size_units}`")
+            if fd.risk_reward is not None:
+                lines.append(f"- Risk reward = `{fd.risk_reward:.2f}`")
+            if fd.position_size_recommendation:
+                lines.append(f"- Position size: {fd.position_size_recommendation}")
             if fd.time_in_force_minutes:
                 lines.append(f"- TIF = `{fd.time_in_force_minutes} phút`")
+        if fd.reasons:
+            lines.append("- Reasons: " + "; ".join(fd.reasons[:5]))
+        if fd.conditions_to_cancel_trade:
+            lines.append(
+                "- Conditions to cancel: "
+                + "; ".join(fd.conditions_to_cancel_trade[:5])
+            )
         if fd.blackout_warning:
             lines.append(f"- ⚠️ Blackout: {fd.blackout_warning}")
         if fd.contradictions_resolved:

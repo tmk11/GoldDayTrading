@@ -144,6 +144,14 @@ Quy tắc cứng cho FINALIZE
 - Position size: dùng tham số risk-per-trade trong rationale.
 - `time_in_force_minutes`: ước lượng tối đa thời gian giữ lệnh,
   thường <= 240 phút intraday.
+- Không dùng voting đơn giản. Bull/Bear case chỉ là bằng chứng đối
+  lập; quyết định cuối phải dựa trên explicit risk rules: blackout,
+  geometry, R:R, invalidation, confirmation, position sizing.
+- Khi finalize, `FinalDecision` phải thể hiện các field downstream:
+  `final_action` LONG/SHORT/NO_TRADE, `confidence_score` 0-100,
+  `entry`, `stop_loss`, `take_profit`, `risk_reward`,
+  `position_size_recommendation`, `reasons`,
+  `conditions_to_cancel_trade`.
 
 `rationale` viết bằng TIẾNG VIỆT, <= 200 từ.
 """
@@ -164,6 +172,8 @@ def _build_user_prompt(state: AgentState) -> str:
     # Output từ các agent
     tech = state.agent_outputs.get("technical")
     macro = state.agent_outputs.get("macro_news")
+    bull = state.bull_case
+    bear = state.bear_case
 
     parts.append("\n### Technical Agent output")
     if tech:
@@ -186,6 +196,28 @@ def _build_user_prompt(state: AgentState) -> str:
         parts.append(f"- summary: {macro.summary}")
     else:
         parts.append("_(chưa có)_")
+
+    parts.append("\n### Bull Case Agent output")
+    if bull:
+        parts.append(f"- confidence=`{bull.confidence:.2f}`")
+        parts.append(f"- bullish_thesis: {bull.thesis}")
+        parts.append(f"- supporting_evidence: {bull.supporting_evidence}")
+        parts.append(f"- required_confirmation: {bull.required_confirmation}")
+        parts.append(f"- invalidation_level: {bull.invalidation_level}")
+        parts.append(f"- risk_factors: {bull.risk_factors}")
+    else:
+        parts.append("_(debate skipped)_")
+
+    parts.append("\n### Bear Case Agent output")
+    if bear:
+        parts.append(f"- confidence=`{bear.confidence:.2f}`")
+        parts.append(f"- bearish_thesis: {bear.thesis}")
+        parts.append(f"- supporting_evidence: {bear.supporting_evidence}")
+        parts.append(f"- required_confirmation: {bear.required_confirmation}")
+        parts.append(f"- invalidation_level: {bear.invalidation_level}")
+        parts.append(f"- risk_factors: {bear.risk_factors}")
+    else:
+        parts.append("_(debate skipped)_")
 
     # Cảnh báo
     contradiction = state.has_contradiction()
@@ -215,7 +247,8 @@ def _build_user_prompt(state: AgentState) -> str:
 
     parts.append(
         "\n**Yêu cầu:** trả về `RiskManagerVerdict` theo schema. "
-        "Nếu finalize, lấy entry/stop/tp từ key_levels của Technical."
+        "Nếu finalize, lấy entry/stop/tp từ key_levels của Technical. "
+        "Không dùng voting; hãy phân xử bull/bear bằng risk rules rõ ràng."
     )
     return "\n".join(parts)
 
@@ -392,6 +425,17 @@ def _coerce_verdict(raw: Any) -> RiskManagerVerdict:
         ) or "Risk Manager finalized after schema normalization."
     final_decision = data.get("final_decision")
     if isinstance(final_decision, dict):
+        if "final_action" in final_decision and "bias" not in final_decision:
+            action = final_decision.get("final_action")
+            final_decision["bias"] = "NEUTRAL" if action == "NO_TRADE" else action
+        if isinstance(final_decision.get("confidence"), (int, float)) and final_decision["confidence"] > 1:
+            final_decision["confidence"] = float(final_decision["confidence"]) / 100.0
+        if "confidence_score" in final_decision and "confidence" not in final_decision:
+            final_decision["confidence"] = float(final_decision.get("confidence_score") or 0) / 100.0
+        if "take_profit" in final_decision and "take_profit_1" not in final_decision:
+            final_decision["take_profit_1"] = final_decision.get("take_profit")
+        if "risk_reward" in final_decision and "rr_ratio" not in final_decision:
+            final_decision["rr_ratio"] = final_decision.get("risk_reward")
         if final_decision.get("time_in_force_minutes") == 0:
             final_decision["time_in_force_minutes"] = None
         if not final_decision.get("rationale"):
