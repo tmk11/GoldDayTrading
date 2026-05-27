@@ -438,38 +438,10 @@ def _fallback_finalize(
     }
 
 def _deterministic_setup_decision(state: AgentState, reason: str) -> Optional[FinalDecision]:
-    tech = state.agent_outputs.get("technical")
-    if not tech or not tech.key_levels:
-        return None
     min_rr = float(os.environ.get("GDT_AGENTIC_MIN_RR", "1.2"))
-    setups: Dict[str, Dict[str, float]] = {}
-    for raw_key, value in tech.key_levels.items():
-        if not isinstance(value, (int, float)):
-            continue
-        if "." in raw_key:
-            setup_id, field = raw_key.rsplit(".", 1)
-        else:
-            setup_id, field = "setup", raw_key
-        setups.setdefault(setup_id, {})[field.lower()] = float(value)
-
-    candidates: List[tuple[float, str, Dict[str, float], str]] = []
-    for setup_id, fields in setups.items():
-        entry = fields.get("entry")
-        stop = fields.get("stop") or fields.get("stop_loss")
-        tp1 = fields.get("tp1") or fields.get("take_profit") or fields.get("take_profit_1")
-        rr = fields.get("rr1") or fields.get("rr") or fields.get("risk_reward") or fields.get("rr_ratio")
-        if entry is None or stop is None or tp1 is None or rr is None or rr < min_rr:
-            continue
-        upper_id = setup_id.upper()
-        if "SHORT" in upper_id or (stop > entry and tp1 < entry):
-            side = "SHORT"
-        elif "LONG" in upper_id or (stop < entry and tp1 > entry):
-            side = "LONG"
-        else:
-            continue
-        score = fields.get("score", 0.0) + rr
-        candidates.append((score, setup_id, fields, side))
-
+    candidates = _candidates_from_agent_key_levels(state, min_rr)
+    if not candidates:
+        candidates = _candidates_from_live_level_pool(state, min_rr)
     if not candidates:
         return None
     _, setup_id, fields, side = max(candidates, key=lambda item: item[0])
@@ -517,6 +489,71 @@ def _deterministic_setup_decision(state: AgentState, reason: str) -> Optional[Fi
             "Cancel during high-impact blackout or abnormal spread/liquidity.",
         ],
     )
+
+def _candidates_from_agent_key_levels(state: AgentState, min_rr: float):
+    tech = state.agent_outputs.get("technical")
+    if not tech or not tech.key_levels:
+        return []
+    setups: Dict[str, Dict[str, float]] = {}
+    for raw_key, value in tech.key_levels.items():
+        if not isinstance(value, (int, float)):
+            continue
+        if "." in raw_key:
+            setup_id, field = raw_key.rsplit(".", 1)
+        else:
+            setup_id, field = "setup", raw_key
+        setups.setdefault(setup_id, {})[field.lower()] = float(value)
+    return _filter_setup_candidates(setups, min_rr)
+
+def _candidates_from_live_level_pool(state: AgentState, min_rr: float):
+    try:
+        from golddaytrading.dataflows.indicators import compute_indicators
+        from golddaytrading.dataflows.intraday_data import fetch_intraday_ohlcv
+        from golddaytrading.signals.levels import build_level_pool
+    except Exception as exc:  # pragma: no cover
+        logger.warning("Risk Manager fallback level-pool import failed: %s", exc)
+        return []
+    try:
+        df = fetch_intraday_ohlcv(state.asset, timeframe=state.primary_timeframe, bars=200)
+        if df is None or df.empty:
+            return []
+        ind = compute_indicators(df)
+    except Exception as exc:  # pragma: no cover
+        logger.warning("Risk Manager fallback OHLCV failed: %s", exc)
+        return []
+    htf_trend = state.market_data.htf_trend if state.market_data else None
+    pool = build_level_pool(df, ind, min_rr=min_rr, htf_trend=htf_trend)
+    setups: Dict[str, Dict[str, float]] = {}
+    for idea in pool.ideas:
+        setups[idea.setup_id] = {
+            "entry": float(idea.entry),
+            "stop": float(idea.stop),
+            "tp1": float(idea.tp1),
+            "tp2": float(idea.tp2),
+            "rr1": float(idea.rr1),
+            "score": float(idea.score),
+        }
+    return _filter_setup_candidates(setups, min_rr)
+
+def _filter_setup_candidates(setups: Dict[str, Dict[str, float]], min_rr: float):
+    candidates = []
+    for setup_id, fields in setups.items():
+        entry = fields.get("entry")
+        stop = fields.get("stop") or fields.get("stop_loss")
+        tp1 = fields.get("tp1") or fields.get("take_profit") or fields.get("take_profit_1")
+        rr = fields.get("rr1") or fields.get("rr") or fields.get("risk_reward") or fields.get("rr_ratio")
+        if entry is None or stop is None or tp1 is None or rr is None or rr < min_rr:
+            continue
+        upper_id = setup_id.upper()
+        if "SHORT" in upper_id or (stop > entry and tp1 < entry):
+            side = "SHORT"
+        elif "LONG" in upper_id or (stop < entry and tp1 > entry):
+            side = "LONG"
+        else:
+            continue
+        score = float(fields.get("score", 0.0)) + float(rr)
+        candidates.append((score, setup_id, fields, side))
+    return candidates
 
 def _extract_json_object(content: Any) -> Dict[str, Any]:
     text = content if isinstance(content, str) else str(content)
