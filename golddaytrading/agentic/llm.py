@@ -57,6 +57,8 @@ def get_chat_model(
         )
 
     base_url: Optional[str] = os.environ.get("OPENAI_BASE_URL") or None
+    if timeout == 60.0:
+        timeout = float(os.environ.get("GDT_LLM_TIMEOUT", timeout))
     return ChatOpenAI(
         model=model,
         temperature=temperature,

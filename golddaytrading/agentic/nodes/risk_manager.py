@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import json
+import os
 from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, model_validator
@@ -33,6 +34,10 @@ from golddaytrading.agentic.state import (
 )
 
 logger = logging.getLogger(__name__)
+
+def _clip(text: object, limit: int = 900) -> str:
+    value = str(text or "")
+    return value if len(value) <= limit else value[:limit].rstrip() + "…"
 
 
 # ---------------------------------------------------------------------------
@@ -192,7 +197,7 @@ def _build_user_prompt(state: AgentState) -> str:
         if tech.key_levels:
             parts.append(f"- key_levels: `{tech.key_levels}`")
         parts.append(f"- tools_called: {tech.tools_called}")
-        parts.append(f"- summary: {tech.summary}")
+        parts.append(f"- summary: {_clip(tech.summary)}")
     else:
         parts.append("_(chưa có)_")
 
@@ -202,16 +207,16 @@ def _build_user_prompt(state: AgentState) -> str:
             f"- bias=`{macro.bias}`, confidence=`{macro.confidence:.2f}`"
         )
         parts.append(f"- tools_called: {macro.tools_called}")
-        parts.append(f"- summary: {macro.summary}")
+        parts.append(f"- summary: {_clip(macro.summary)}")
     else:
         parts.append("_(chưa có)_")
 
     parts.append("\n### Bull Case Agent output")
     if bull:
         parts.append(f"- confidence=`{bull.confidence:.2f}`")
-        parts.append(f"- bullish_thesis: {bull.thesis}")
+        parts.append(f"- bullish_thesis: {_clip(bull.thesis, 500)}")
         parts.append(f"- supporting_evidence: {bull.supporting_evidence}")
-        parts.append(f"- required_confirmation: {bull.required_confirmation}")
+        parts.append(f"- required_confirmation: {_clip(bull.required_confirmation, 400)}")
         parts.append(f"- invalidation_level: {bull.invalidation_level}")
         parts.append(f"- risk_factors: {bull.risk_factors}")
     else:
@@ -220,9 +225,9 @@ def _build_user_prompt(state: AgentState) -> str:
     parts.append("\n### Bear Case Agent output")
     if bear:
         parts.append(f"- confidence=`{bear.confidence:.2f}`")
-        parts.append(f"- bearish_thesis: {bear.thesis}")
+        parts.append(f"- bearish_thesis: {_clip(bear.thesis, 500)}")
         parts.append(f"- supporting_evidence: {bear.supporting_evidence}")
-        parts.append(f"- required_confirmation: {bear.required_confirmation}")
+        parts.append(f"- required_confirmation: {_clip(bear.required_confirmation, 400)}")
         parts.append(f"- invalidation_level: {bear.invalidation_level}")
         parts.append(f"- risk_factors: {bear.risk_factors}")
     else:
@@ -270,7 +275,12 @@ def _build_user_prompt(state: AgentState) -> str:
 
 def risk_manager_node(state: AgentState) -> Dict[str, Any]:
     """Risk Manager node entry — phát hành verdict structured."""
-    chat_model = get_chat_model(state.llm_model_deep, temperature=0.0)
+    chat_model = get_chat_model(
+        state.llm_model_deep,
+        temperature=0.0,
+        timeout=float(os.environ.get("GDT_RISK_MANAGER_TIMEOUT", os.environ.get("GDT_LLM_TIMEOUT", "120"))),
+        max_retries=0,
+    )
 
     user_prompt = _build_user_prompt(state)
 
@@ -288,6 +298,8 @@ def risk_manager_node(state: AgentState) -> Dict[str, Any]:
         verdict = _coerce_verdict(raw_verdict)
     except Exception as exc:
         logger.warning("Risk Manager structured output lỗi: %s", exc)
+        if "timed out" in str(exc).lower() or "timeout" in str(exc).lower():
+            return _fallback_finalize(state, reason=f"structured-output failed: {exc}")
         try:
             from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -368,7 +380,26 @@ def _fallback_finalize(
     reason: str,
     contradictions: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
-    """Tạo FinalDecision NEUTRAL khi LLM lỗi hoặc hết iteration."""
+    """Finalize defensively when Risk Manager LLM fails.
+
+    Prefer a deterministic conditional setup from Technical level pool
+    over blind NO_TRADE when entry/stop/tp/R:R are already available.
+    """
+    setup_decision = _deterministic_setup_decision(state, reason)
+    if setup_decision is not None:
+        log = DebateMessage(
+            role="risk_manager",
+            iteration=state.iteration,
+            content=setup_decision.rationale,
+        )
+        return {
+            "final_decision": setup_decision,
+            "next_node": "END",
+            "iteration": state.iteration + 1,
+            "debate_history": [log],
+            "errors": [f"risk_manager_fallback_setup: {reason}"],
+        }
+
     consensus = state.consensus_bias()
     if consensus == "NEUTRAL":
         decision = FinalDecision(
@@ -405,6 +436,87 @@ def _fallback_finalize(
         "debate_history": [log],
         "errors": [f"risk_manager_fallback: {reason}"],
     }
+
+def _deterministic_setup_decision(state: AgentState, reason: str) -> Optional[FinalDecision]:
+    tech = state.agent_outputs.get("technical")
+    if not tech or not tech.key_levels:
+        return None
+    min_rr = float(os.environ.get("GDT_AGENTIC_MIN_RR", "1.2"))
+    setups: Dict[str, Dict[str, float]] = {}
+    for raw_key, value in tech.key_levels.items():
+        if not isinstance(value, (int, float)):
+            continue
+        if "." in raw_key:
+            setup_id, field = raw_key.rsplit(".", 1)
+        else:
+            setup_id, field = "setup", raw_key
+        setups.setdefault(setup_id, {})[field.lower()] = float(value)
+
+    candidates: List[tuple[float, str, Dict[str, float], str]] = []
+    for setup_id, fields in setups.items():
+        entry = fields.get("entry")
+        stop = fields.get("stop") or fields.get("stop_loss")
+        tp1 = fields.get("tp1") or fields.get("take_profit") or fields.get("take_profit_1")
+        rr = fields.get("rr1") or fields.get("rr") or fields.get("risk_reward") or fields.get("rr_ratio")
+        if entry is None or stop is None or tp1 is None or rr is None or rr < min_rr:
+            continue
+        upper_id = setup_id.upper()
+        if "SHORT" in upper_id or (stop > entry and tp1 < entry):
+            side = "SHORT"
+        elif "LONG" in upper_id or (stop < entry and tp1 > entry):
+            side = "LONG"
+        else:
+            continue
+        score = fields.get("score", 0.0) + rr
+        candidates.append((score, setup_id, fields, side))
+
+    if not candidates:
+        return None
+    _, setup_id, fields, side = max(candidates, key=lambda item: item[0])
+    entry = fields["entry"]
+    stop = fields.get("stop") or fields.get("stop_loss")
+    tp1 = fields.get("tp1") or fields.get("take_profit") or fields.get("take_profit_1")
+    tp2 = fields.get("tp2") or fields.get("take_profit_2")
+    rr = fields.get("rr1") or fields.get("rr") or fields.get("risk_reward") or fields.get("rr_ratio")
+    last_price = state.market_data.last_price if state.market_data else None
+    triggered = False
+    if last_price is not None:
+        triggered = (side == "LONG" and last_price >= entry) or (side == "SHORT" and last_price <= entry)
+    final_action = side if triggered else f"{side}_SETUP"
+    confidence = 0.58 if triggered else 0.54
+    setup_kind = "active" if triggered else "conditional"
+    rationale = (
+        f"Risk Manager LLM fallback due to {reason}. Deterministic {setup_kind} "
+        f"{setup_id} selected from Technical level pool because entry/stop/take-profit "
+        f"geometry is valid and R:R {rr:.2f} >= {min_rr:.2f}."
+    )
+    confirmation = (
+        f"Wait for price confirmation at/through {entry:.2f} before execution."
+        if not triggered else "Setup trigger is already satisfied; still require fresh spread/liquidity check."
+    )
+    return FinalDecision(
+        final_action=final_action, bias=side,
+        confidence=confidence,
+        rationale=rationale,
+        entry=entry, stop_loss=stop, take_profit=tp1,
+        take_profit_1=tp1, take_profit_2=tp2,
+        rr_ratio=rr, risk_reward=rr,
+        position_size_recommendation=(
+            "0.5R until trigger confirms; do not increase size because RM LLM timed out."
+            if not triggered else "Use configured risk-per-trade; no size increase because RM LLM timed out."
+        ),
+        reasons=[
+            f"{setup_id} comes from deterministic Technical level pool.",
+            f"R:R {rr:.2f} meets relaxed threshold {min_rr:.2f}.",
+            confirmation,
+            "Risk Manager LLM timed out, so decision is conservative and conditional.",
+        ],
+        conditions_to_cancel_trade=[
+            f"Cancel if price does not confirm {entry:.2f}.",
+            f"Invalidate if price accepts beyond stop {stop:.2f}.",
+            "Cancel during high-impact blackout or abnormal spread/liquidity.",
+        ],
+    )
 
 def _extract_json_object(content: Any) -> Dict[str, Any]:
     text = content if isinstance(content, str) else str(content)
