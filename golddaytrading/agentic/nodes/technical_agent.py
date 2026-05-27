@@ -58,7 +58,11 @@ Quy tắc bắt buộc
       pivot D/W/M);
     * setup nào trong level pool (nếu có) đáng cân nhắc;
     * điều kiện invalidate setup.
-- Nếu không có setup R:R đủ → `bias = NEUTRAL`.
+- Ngưỡng R:R tối thiểu mặc định cho agentic workflow là 1.2
+  (`get_level_pool` min_rr=1.2). Nếu setup chưa active nhưng có
+  entry/stop/tp hợp lệ, vẫn nêu rõ như một conditional setup.
+- Nếu không có setup R:R đủ và cũng không có conditional setup rõ →
+  `bias = NEUTRAL`.
 - `confidence` đặt theo confluence:
     * 0.7+: nhiều tín hiệu đồng thuận, HTF cùng chiều, ATR vừa.
     * 0.4-0.7: tín hiệu mixed.
@@ -108,7 +112,7 @@ def _build_user_prompt(state: AgentState) -> str:
 
     parts.append(
         "\n**Yêu cầu:** phân tích kỹ thuật, đề xuất bias + confidence "
-        "+ (tuỳ chọn) key_levels lấy từ `get_level_pool`. "
+        "+ (tuỳ chọn) key_levels lấy từ `get_level_pool` với min_rr=1.2. "
         "Không bịa giá. Trả lời theo schema `AgentOutput`."
     )
     return "\n".join(parts)

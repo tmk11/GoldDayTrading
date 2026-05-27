@@ -155,46 +155,52 @@ def render_final_report(state: AgentState) -> str:
             lines.append("")
 
     # Final decision
-    lines.append("## Quyết định cuối\n")
+    lines.append("## Final Decision\n")
     fd = state.final_decision
     if fd is None:
-        lines.append("_(không có — workflow kết thúc bất thường)_")
+        lines.append("Status: `ERROR` — workflow kết thúc bất thường.")
     else:
-        lines.append(
-            f"- **Final action:** `{fd.final_action}`  ·  "
-            f"**Confidence score:** `{fd.confidence_score}/100`"
-        )
-        lines.append(f"- **Bias:** `{fd.bias}`  ·  **Confidence:** `{fd.confidence:.2f}`")
-        if fd.bias != "NEUTRAL":
-            lines.append(
-                f"- Entry `{fd.entry:.2f}` · Stop `{fd.stop_loss:.2f}` · "
-                f"Take profit `{(fd.take_profit or fd.take_profit_1):.2f}`"
-                + (f" · TP2 `{fd.take_profit_2:.2f}`"
-                   if fd.take_profit_2 is not None else "")
-            )
+        status_label = {
+            "LONG": "READY_LONG",
+            "SHORT": "READY_SHORT",
+            "LONG_SETUP": "PENDING_LONG_SETUP",
+            "SHORT_SETUP": "PENDING_SHORT_SETUP",
+            "NO_TRADE": "NO_TRADE",
+        }.get(fd.final_action, fd.final_action)
+        lines.append(f"Action: `{fd.final_action}`  |  Status: `{status_label}`")
+        lines.append(f"Confidence: `{fd.confidence_score}/100`")
+        if fd.final_action != "NO_TRADE":
+            lines.append(f"Entry: `{fd.entry:.2f}`")
+            lines.append(f"Stop loss: `{fd.stop_loss:.2f}`")
+            lines.append(f"Take profit: `{(fd.take_profit or fd.take_profit_1):.2f}`")
+            if fd.take_profit_2 is not None:
+                lines.append(f"Take profit 2: `{fd.take_profit_2:.2f}`")
             if fd.risk_reward is not None:
-                lines.append(f"- Risk reward = `{fd.risk_reward:.2f}`")
+                lines.append(f"Risk/Reward: `{fd.risk_reward:.2f}`")
             if fd.position_size_recommendation:
-                lines.append(f"- Position size: {fd.position_size_recommendation}")
-            if fd.time_in_force_minutes:
-                lines.append(f"- TIF = `{fd.time_in_force_minutes} phút`")
-        if fd.reasons:
-            lines.append("- Reasons: " + "; ".join(fd.reasons[:5]))
-        if fd.conditions_to_cancel_trade:
-            lines.append(
-                "- Conditions to cancel: "
-                + "; ".join(fd.conditions_to_cancel_trade[:5])
-            )
+                lines.append(f"Position size: {fd.position_size_recommendation}")
+        else:
+            lines.append("Entry: `—`")
+            lines.append("Stop loss: `—`")
+            lines.append("Take profit: `—`")
+            lines.append("Risk/Reward: `—`")
+        if fd.time_in_force_minutes:
+            lines.append(f"Time in force: `{fd.time_in_force_minutes} phút`")
         if fd.blackout_warning:
-            lines.append(f"- ⚠️ Blackout: {fd.blackout_warning}")
+            lines.append(f"Blackout: {fd.blackout_warning}")
+        if fd.reasons:
+            lines.append("Reasons:")
+            for reason in fd.reasons[:4]:
+                lines.append(f"- {reason}")
+        else:
+            lines.append(f"Reason: {fd.rationale}")
+        if fd.conditions_to_cancel_trade:
+            lines.append("Cancel / invalidate if:")
+            for condition in fd.conditions_to_cancel_trade[:4]:
+                lines.append(f"- {condition}")
         if fd.contradictions_resolved:
-            lines.append(
-                "- Mâu thuẫn đã giải quyết: "
-                + "; ".join(fd.contradictions_resolved)
-            )
+            lines.append("Resolved conflicts: " + "; ".join(fd.contradictions_resolved[:4]))
         lines.append("")
-        lines.append("**Lý do:**")
-        lines.append(fd.rationale)
 
     # Debate log (rút gọn)
     if state.debate_history:

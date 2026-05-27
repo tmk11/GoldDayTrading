@@ -48,7 +48,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 TradingBias = Literal["LONG", "SHORT", "NEUTRAL"]
-FinalAction = Literal["LONG", "SHORT", "NO_TRADE"]
+FinalAction = Literal["LONG", "SHORT", "NO_TRADE", "LONG_SETUP", "SHORT_SETUP"]
 """Hướng giao dịch cuối cùng. Dùng `NEUTRAL` thay cho `FLAT` để
 khớp với gợi ý trong yêu cầu bài toán; mapping sang pipeline cũ:
 NEUTRAL = FLAT (không vào lệnh).
@@ -149,6 +149,37 @@ class AgentOutput(BaseModel):
     )
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def _normalize_agent_confidence(cls, value):
+        if isinstance(value, (int, float)) and value > 1:
+            return float(value) / 100.0
+        return value
+
+    @field_validator("key_levels", mode="before")
+    @classmethod
+    def _normalize_key_levels(cls, value):
+        if value is None:
+            return {}
+        if isinstance(value, dict):
+            return {
+                str(key): float(val)
+                for key, val in value.items()
+                if isinstance(val, (int, float))
+            }
+        if isinstance(value, list):
+            normalized: Dict[str, float] = {}
+            for idx, item in enumerate(value, start=1):
+                if isinstance(item, dict):
+                    prefix = str(item.get("setup_id") or item.get("setup") or f"setup_{idx}")
+                    for key, val in item.items():
+                        if isinstance(val, (int, float)):
+                            normalized[f"{prefix}.{key}"] = float(val)
+                elif isinstance(item, (int, float)):
+                    normalized[f"level_{idx}"] = float(item)
+            return normalized
+        return {}
+
 class DebateCase(BaseModel):
     """Lightweight bull/bear case used as an advisory debate layer."""
 
@@ -218,11 +249,11 @@ class FinalDecision(BaseModel):
     lại). Validation thực hiện trong `model_validator`.
     """
 
-    bias: TradingBias
+    bias: TradingBias = "NEUTRAL"
     final_action: FinalAction = "NO_TRADE"
-    confidence: float = Field(..., ge=0.0, le=1.0)
+    confidence: float = Field(0.0, ge=0.0, le=1.0)
     confidence_score: int = Field(0, ge=0, le=100)
-    rationale: str = Field(..., description="Tóm tắt lý do <= 200 từ.")
+    rationale: str = Field("", description="Tóm tắt lý do <= 200 từ.")
     entry: Optional[float] = None
     stop_loss: Optional[float] = None
     take_profit_1: Optional[float] = None
@@ -246,7 +277,18 @@ class FinalDecision(BaseModel):
 
     @model_validator(mode="after")
     def _check_geometry(self) -> "FinalDecision":
-        self.final_action = "NO_TRADE" if self.bias == "NEUTRAL" else self.bias
+        if self.final_action == "LONG_SETUP":
+            self.bias = "LONG"
+        elif self.final_action == "SHORT_SETUP":
+            self.bias = "SHORT"
+        elif self.bias == "NEUTRAL":
+            self.final_action = "NO_TRADE"
+        elif self.final_action == "NO_TRADE":
+            self.final_action = self.bias
+        if self.confidence == 0 and self.confidence_score > 0:
+            self.confidence = self.confidence_score / 100.0
+        if not self.rationale and self.reasons:
+            self.rationale = "; ".join(self.reasons[:3])
         self.confidence_score = int(round(self.confidence * 100))
         if self.take_profit is None:
             self.take_profit = self.take_profit_1
@@ -266,7 +308,7 @@ class FinalDecision(BaseModel):
                 self.conditions_to_cancel_trade = [f"Cancel/exit if price accepts above {self.stop_loss:.2f}."]
             else:
                 self.conditions_to_cancel_trade = ["No trade until confirmation and risk/reward conditions are met."]
-        # NEUTRAL không cần entry/stop.
+        # NEUTRAL/NO_TRADE không cần entry/stop.
         if self.bias == "NEUTRAL":
             return self
         # LONG / SHORT cần đủ entry và stop.
@@ -287,6 +329,31 @@ class FinalDecision(BaseModel):
             if self.take_profit_1 is not None and self.take_profit_1 >= self.entry:
                 raise ValueError("SHORT: take_profit_1 phải < entry.")
         return self
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def _normalize_decision_confidence(cls, value):
+        if isinstance(value, (int, float)) and value > 1:
+            return float(value) / 100.0
+        return value
+
+    @field_validator(
+        "entry", "stop_loss", "take_profit_1", "take_profit",
+        "take_profit_2", "rr_ratio", "risk_reward", mode="before"
+    )
+    @classmethod
+    def _coerce_optional_number(cls, value):
+        if value is None or isinstance(value, (int, float)):
+            return value
+        if isinstance(value, dict):
+            for key in ("take_profit", "take_profit_1", "tp1", "value", "price"):
+                if isinstance(value.get(key), (int, float)):
+                    return float(value[key])
+            return None
+        text = str(value).replace(",", "")
+        import re
+        match = re.search(r"-?\d+(?:\.\d+)?", text)
+        return float(match.group(0)) if match else None
 
 
 # ---------------------------------------------------------------------------

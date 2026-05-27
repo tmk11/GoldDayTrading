@@ -134,8 +134,16 @@ Quy tắc cứng cho FINALIZE
 -------------------------
 
 - LONG/SHORT bắt buộc có `entry`, `stop_loss`, `take_profit_1`,
-  `take_profit_2`, và `rr_ratio >= 1.5`. Geometry: với LONG thì
+  `take_profit_2`, và `rr_ratio >= 1.2`. Geometry: với LONG thì
   `stop_loss < entry < take_profit_1 <= take_profit_2`.
+- `final_action = LONG` hoặc `SHORT` chỉ dùng khi setup đã trigger
+  hoặc có thể vào ngay theo confirmation hiện tại.
+- `final_action = LONG_SETUP` hoặc `SHORT_SETUP` dùng cho conditional
+  setup: có entry/stop/take_profit/risk_reward hợp lệ từ level pool,
+  nhưng giá chưa kích hoạt hoặc còn cần xác nhận. Đây là kế hoạch chờ,
+  không phải lệnh market ngay.
+- `final_action = NO_TRADE` chỉ dùng khi không có setup hợp lệ, R:R < 1.2,
+  blackout, hoặc risk rules không đạt.
 - Lấy giá CHÍNH XÁC từ level pool đã có sẵn trong output của
   Technical Agent (`agent_outputs.technical.key_levels`). KHÔNG bịa
   giá. Nếu Technical không cung cấp key_levels mà bias không phải
@@ -148,7 +156,8 @@ Quy tắc cứng cho FINALIZE
   lập; quyết định cuối phải dựa trên explicit risk rules: blackout,
   geometry, R:R, invalidation, confirmation, position sizing.
 - Khi finalize, `FinalDecision` phải thể hiện các field downstream:
-  `final_action` LONG/SHORT/NO_TRADE, `confidence_score` 0-100,
+  `final_action` LONG/SHORT/LONG_SETUP/SHORT_SETUP/NO_TRADE,
+  `confidence_score` 0-100,
   `entry`, `stop_loss`, `take_profit`, `risk_reward`,
   `position_size_recommendation`, `reasons`,
   `conditions_to_cancel_trade`.
@@ -248,6 +257,7 @@ def _build_user_prompt(state: AgentState) -> str:
     parts.append(
         "\n**Yêu cầu:** trả về `RiskManagerVerdict` theo schema. "
         "Nếu finalize, lấy entry/stop/tp từ key_levels của Technical. "
+        "Nếu setup hợp lệ nhưng chưa trigger, dùng LONG_SETUP/SHORT_SETUP thay vì NO_TRADE. "
         "Không dùng voting; hãy phân xử bull/bear bằng risk rules rõ ràng."
     )
     return "\n".join(parts)
@@ -427,7 +437,14 @@ def _coerce_verdict(raw: Any) -> RiskManagerVerdict:
     if isinstance(final_decision, dict):
         if "final_action" in final_decision and "bias" not in final_decision:
             action = final_decision.get("final_action")
-            final_decision["bias"] = "NEUTRAL" if action == "NO_TRADE" else action
+            if action == "NO_TRADE":
+                final_decision["bias"] = "NEUTRAL"
+            elif action == "LONG_SETUP":
+                final_decision["bias"] = "LONG"
+            elif action == "SHORT_SETUP":
+                final_decision["bias"] = "SHORT"
+            else:
+                final_decision["bias"] = action
         if isinstance(final_decision.get("confidence"), (int, float)) and final_decision["confidence"] > 1:
             final_decision["confidence"] = float(final_decision["confidence"]) / 100.0
         if "confidence_score" in final_decision and "confidence" not in final_decision:

@@ -18,6 +18,7 @@ Lý do thiết kế:
 from __future__ import annotations
 
 import logging
+import os
 from typing import Optional
 
 from langchain_core.tools import tool
@@ -164,7 +165,7 @@ def get_level_pool(
     ticker: str = "XAUUSD=X",
     timeframe: str = "15m",
     bars: int = 200,
-    min_rr: float = 1.5,
+    min_rr: float = 1.2,
     htf_trend: Optional[str] = None,
 ) -> str:
     """Sinh **level pool deterministic** (entry/stop/tp) từ indicator.
@@ -184,6 +185,7 @@ def get_level_pool(
     if df is None or df.empty:
         return f"_(không sinh được level pool cho {ticker})_"
     ind = compute_indicators(df)
+    min_rr = float(os.environ.get("GDT_AGENTIC_MIN_RR", min_rr))
 
     if htf_trend is None:
         try:
