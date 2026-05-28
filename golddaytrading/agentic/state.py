@@ -277,14 +277,31 @@ class FinalDecision(BaseModel):
 
     @model_validator(mode="after")
     def _check_geometry(self) -> "FinalDecision":
+        fields_set = self.model_fields_set
         if self.final_action == "LONG_SETUP":
             self.bias = "LONG"
         elif self.final_action == "SHORT_SETUP":
             self.bias = "SHORT"
-        elif self.bias == "NEUTRAL":
+        elif self.final_action == "NO_TRADE" and "final_action" in fields_set:
+            self.bias = "NEUTRAL"
+        elif self.final_action in ("LONG", "SHORT"):
+            self.bias = self.final_action
+        if self.bias == "NEUTRAL":
             self.final_action = "NO_TRADE"
         elif self.final_action == "NO_TRADE":
             self.final_action = self.bias
+        if self.bias != "NEUTRAL" and (self.entry is None or self.stop_loss is None):
+            if not self.rationale:
+                self.rationale = "No valid entry/stop available; downgraded to NO_TRADE."
+            self.bias = "NEUTRAL"
+            self.final_action = "NO_TRADE"
+            self.entry = None
+            self.stop_loss = None
+            self.take_profit = None
+            self.take_profit_1 = None
+            self.take_profit_2 = None
+            self.rr_ratio = None
+            self.risk_reward = None
         if self.confidence == 0 and self.confidence_score > 0:
             self.confidence = self.confidence_score / 100.0
         if not self.rationale and self.reasons:
